@@ -34,7 +34,7 @@ def generate_frames():
             print("Gagal membaca frame dari kamera.")
             break
 
-        frame = cv2.resize(frame, (640, 480))
+        frame = cv2.resize(frame, (320, 240))
 
         # jalankan deteksi YOLO di frame ini
         results = model(frame, verbose=False)[0]
@@ -70,7 +70,7 @@ def video():
 
 @app.route('/')
 def index():
-    return '<h1>Tahap Awal: Deteksi Person YOLOv8n</h1><img src="/video" width="640">'
+    return '<h1>Very Irawati: Deteksi Person YOLOv8n</h1><img src="/video" width="320" height="240">'
 
 
 if __name__ == '__main__':
