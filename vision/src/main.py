@@ -81,7 +81,7 @@ def video():
 
 @app.route('/')
 def index():
-    return '<h1> Very irawati: Deteksi Person YOLOv8n (Optimized)</h1><img src="/video" width="320">'
+    return '<h1> YOLO Very irawati </h1><img src="/video" width="320">'
 
 
 if __name__ == '__main__':
