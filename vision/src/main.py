@@ -16,19 +16,18 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 if not cap.isOpened():
     print("ERROR: Kamera tidak bisa dibuka. Cek koneksi USB webcam.")
 
-# --- Optimasi frame skip (dari versi sebelumnya) ---
 FRAME_SKIP = 2
 frame_count = 0
-last_tracks = []  # simpan hasil tracking terakhir: list of (x1,y1,x2,y2,conf,track_id)
+last_tracks = []
 
-# --- FPS counter ---
 prev_time = time.time()
 fps = 0.0
 
 # --- State target locking ---
+# locked_id TIDAK PERNAH di-reset otomatis lagi (tidak ada LOST_TIMEOUT).
+# Sekali lock, sistem akan terus menunggu ID ini muncul lagi, walau lama tidak terlihat.
 locked_id = None
 last_seen_time = None
-LOST_TIMEOUT = 2.0  # detik, sebelum target dianggap hilang
 
 
 def generate_frames():
@@ -47,11 +46,9 @@ def generate_frames():
         fps = 1.0 / (current_time - prev_time) if current_time != prev_time else fps
         prev_time = current_time
 
-        # --- Jalankan tracking hanya tiap FRAME_SKIP+1 frame ---
         if frame_count % (FRAME_SKIP + 1) == 0:
-            # model.track() otomatis memberi ID unik antar frame (ByteTrack)
             results = model.track(frame, persist=True, verbose=False,
-                                   imgsz=320, conf=0.5, classes=[0])[0]  # classes=[0] -> hanya "person"
+                                   imgsz=320, conf=0.5, classes=[0])[0]
 
             last_tracks = []
             if results.boxes is not None and results.boxes.id is not None:
@@ -63,12 +60,11 @@ def generate_frames():
 
         frame_count += 1
 
-        # --- Logika target locking ---
         target_found_this_frame = False
 
         for (x1, y1, x2, y2, conf, track_id) in last_tracks:
             if locked_id is None:
-                # belum ada target -> kunci orang pertama yang terdeteksi
+                # hanya mengunci target BARU kalau memang belum pernah ada target sama sekali
                 locked_id = track_id
                 last_seen_time = time.time()
 
@@ -86,7 +82,6 @@ def generate_frames():
                 cv2.putText(frame, f'LOCKED ID:{track_id}', (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-                # --- Arah relatif terhadap tengah frame ---
                 offset_x = centroid_x - frame_center_x
                 if offset_x < -30:
                     direction = "KIRI"
@@ -101,22 +96,19 @@ def generate_frames():
                 # TODO: kirim (direction, centroid_x, centroid_y) via serial ke ESP32 di sini
 
             else:
-                # orang lain, bukan target -> gambar netral (abu-abu)
+                # orang lain -> SELALU diabaikan, tidak pernah menggantikan locked_id
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (100, 100, 100), 1)
                 cv2.putText(frame, f'ID:{track_id}', (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), 1)
 
-        # --- Cek target hilang ---
+        # --- Tidak ada reset otomatis lagi. Kalau target tidak terlihat, ---
+        # --- sistem hanya menampilkan status menunggu, locked_id TETAP sama. ---
         if locked_id is not None and not target_found_this_frame:
             elapsed = time.time() - last_seen_time
-            if elapsed > LOST_TIMEOUT:
-                cv2.putText(frame, 'TARGET HILANG', (10, 100),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                # TODO: kirim perintah STOP ke ESP32 di sini
-                locked_id = None
-            else:
-                cv2.putText(frame, f'Mencari... ({elapsed:.1f}s)', (10, 100),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+            cv2.putText(frame, f'Menunggu ID:{locked_id} muncul lagi... ({elapsed:.1f}s)',
+                        (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+            # TODO: pertimbangkan kirim perintah STOP sementara ke ESP32 di sini
+            # (robot berhenti bergerak tapi TIDAK melepas lock ID)
 
         cv2.putText(frame, f'FPS: {fps:.1f}', (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
@@ -136,7 +128,28 @@ def video():
 
 @app.route('/')
 def index():
-    return '<h1>VERY IRAWATI HAMA TEKNIK ELEKTRO UNESA</h1><img src="/video" width="320">'
+    # --- Tampilan full-screen: img mengisi lebar viewport, tinggi menyesuaikan otomatis ---
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Person Tracking + Permanent Lock</title>
+        <style>
+            body { margin: 0; padding: 0; background: black; }
+            img {
+                display: block;
+                width: 100vw;
+                height: 100vh;
+                object-fit: contain;
+            }
+        </style>
+    </head>
+    <body>
+        <img src="/video">
+    </body>
+    </html>
+    '''
 
 
 if __name__ == '__main__':
