@@ -9,7 +9,7 @@ print("Loading model YOLOv8n...")
 model = YOLO('yolov8n.pt')
 print("Model siap.")
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture('/dev/video2')
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
