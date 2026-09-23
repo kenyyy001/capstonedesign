@@ -9,7 +9,7 @@ print("Loading model YOLOv8n...")
 model = YOLO('yolov8n.pt')
 print("Model siap.")
 
-cap = cv2.VideoCapture('/dev/v4l/by-id/usb-046d_0819_1BE968E0-video-index0', cv2.CAP_V4L2)
+cap = cv2.VideoCapture(1)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
