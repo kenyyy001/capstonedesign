@@ -11,7 +11,7 @@ model = YOLO('yolov8n.pt')
 print("Model siap.")
 
 # Ganti sesuai device kamera yang benar (cek dengan: ls /dev/video* dan v4l2-ctl --list-devices)
-cap = cv2.VideoCapture(0))
+cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
