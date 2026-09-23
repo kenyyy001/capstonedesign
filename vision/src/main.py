@@ -1,6 +1,7 @@
 from flask import Flask, Response
 from ultralytics import YOLO
 import cv2
+import numpy as np
 import time
 
 app = Flask(__name__)
@@ -9,29 +10,53 @@ print("Loading model YOLOv8n...")
 model = YOLO('yolov8n.pt')
 print("Model siap.")
 
+# Ganti sesuai device kamera yang benar (cek dengan: ls /dev/video* dan v4l2-ctl --list-devices)
 cap = cv2.VideoCapture('/dev/video2')
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
 if not cap.isOpened():
-    print("ERROR: Kamera tidak bisa dibuka. Cek koneksi USB webcam.")
+    print("ERROR: Kamera tidak bisa dibuka. Cek path device-nya.")
 
-FRAME_SKIP = 2
+FRAME_SKIP = 1  # dikurangi supaya tracking lebih responsif, penting untuk re-id
 frame_count = 0
 last_tracks = []
 
 prev_time = time.time()
 fps = 0.0
 
-# --- State target locking ---
-# locked_id TIDAK PERNAH di-reset otomatis lagi (tidak ada LOST_TIMEOUT).
-# Sekali lock, sistem akan terus menunggu ID ini muncul lagi, walau lama tidak terlihat.
-locked_id = None
-last_seen_time = None
+# --- State target locking berbasis histogram warna (bukan cuma ID tracker) ---
+locked_id = None                 # ID tracker saat ini yang dianggap target (bisa berubah-ubah)
+target_histogram = None          # "sidik jari warna" target yang dikunci pertama kali
+MATCH_THRESHOLD = 0.5            # ambang kemiripan histogram (0-1, makin tinggi makin mirip)
+HIST_UPDATE_RATE = 0.1           # seberapa cepat histogram target diperbarui (adaptasi pencahayaan)
+
+
+def compute_histogram(frame, box):
+    """Hitung histogram warna HSV dari area bounding box (dipakai sebagai 'sidik jari' orang)."""
+    x1, y1, x2, y2 = box
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    crop = frame[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
+    cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+    return hist
+
+
+def compare_histogram(hist1, hist2):
+    """Return skor kemiripan 0-1 (1 = identik) pakai metode korelasi."""
+    if hist1 is None or hist2 is None:
+        return 0.0
+    score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+    return max(0.0, score)  # clamp, korelasi bisa negatif
 
 
 def generate_frames():
-    global frame_count, last_tracks, prev_time, fps, locked_id, last_seen_time
+    global frame_count, last_tracks, prev_time, fps, locked_id, target_histogram
 
     while True:
         ret, frame = cap.read()
@@ -60,55 +85,59 @@ def generate_frames():
 
         frame_count += 1
 
-        target_found_this_frame = False
+        best_match_score = 0.0
+        best_match_box = None
 
+        # --- Kalau belum ada target sama sekali, kunci orang pertama yang muncul ---
+        if target_histogram is None and len(last_tracks) > 0:
+            x1, y1, x2, y2, conf, track_id = last_tracks[0]
+            target_histogram = compute_histogram(frame, (x1, y1, x2, y2))
+            locked_id = track_id
+
+        # --- Cari kandidat yang histogramnya PALING MIRIP dengan target ---
+        elif target_histogram is not None:
+            for (x1, y1, x2, y2, conf, track_id) in last_tracks:
+                hist = compute_histogram(frame, (x1, y1, x2, y2))
+                score = compare_histogram(hist, target_histogram)
+                if score > best_match_score:
+                    best_match_score = score
+                    best_match_box = (x1, y1, x2, y2, track_id, hist)
+
+        # --- Gambar semua kotak ---
         for (x1, y1, x2, y2, conf, track_id) in last_tracks:
-            if locked_id is None:
-                # hanya mengunci target BARU kalau memang belum pernah ada target sama sekali
-                locked_id = track_id
-                last_seen_time = time.time()
-
-            is_target = (track_id == locked_id)
+            is_target = (best_match_box is not None and best_match_box[3] == track_id
+                         and best_match_score >= MATCH_THRESHOLD)
 
             if is_target:
-                target_found_this_frame = True
-                last_seen_time = time.time()
-
-                centroid_x = (x1 + x2) // 2
-                centroid_y = (y1 + y2) // 2
+                locked_id = track_id
+                centroid_x, centroid_y = (x1 + x2) // 2, (y1 + y2) // 2
 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.circle(frame, (centroid_x, centroid_y), 6, (0, 0, 255), -1)
-                cv2.putText(frame, f'LOCKED ID:{track_id}', (x1, y1 - 10),
+                cv2.putText(frame, f'LOCKED (mirip:{best_match_score:.2f})', (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
                 offset_x = centroid_x - frame_center_x
-                if offset_x < -30:
-                    direction = "KIRI"
-                elif offset_x > 30:
-                    direction = "KANAN"
-                else:
-                    direction = "LURUS"
-
+                direction = "KIRI" if offset_x < -30 else "KANAN" if offset_x > 30 else "LURUS"
                 cv2.putText(frame, f'Arah: {direction}', (10, 75),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
 
-                # TODO: kirim (direction, centroid_x, centroid_y) via serial ke ESP32 di sini
+                # --- Perbarui histogram target secara perlahan (adaptasi cahaya/pose) ---
+                new_hist = best_match_box[5]
+                if new_hist is not None:
+                    target_histogram = cv2.addWeighted(
+                        target_histogram, 1 - HIST_UPDATE_RATE, new_hist, HIST_UPDATE_RATE, 0)
 
+                # TODO: kirim (direction, centroid_x, centroid_y) via serial ke ESP32 di sini
             else:
-                # orang lain -> SELALU diabaikan, tidak pernah menggantikan locked_id
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (100, 100, 100), 1)
                 cv2.putText(frame, f'ID:{track_id}', (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), 1)
 
-        # --- Tidak ada reset otomatis lagi. Kalau target tidak terlihat, ---
-        # --- sistem hanya menampilkan status menunggu, locked_id TETAP sama. ---
-        if locked_id is not None and not target_found_this_frame:
-            elapsed = time.time() - last_seen_time
-            cv2.putText(frame, f'Menunggu ID:{locked_id} muncul lagi... ({elapsed:.1f}s)',
+        if target_histogram is not None and best_match_score < MATCH_THRESHOLD:
+            cv2.putText(frame, f'Mencari target (skor terbaik: {best_match_score:.2f})...',
                         (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
-            # TODO: pertimbangkan kirim perintah STOP sementara ke ESP32 di sini
-            # (robot berhenti bergerak tapi TIDAK melepas lock ID)
+            # TODO: kirim perintah STOP sementara ke ESP32 di sini
 
         cv2.putText(frame, f'FPS: {fps:.1f}', (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
@@ -128,26 +157,18 @@ def video():
 
 @app.route('/')
 def index():
-    # --- Tampilan full-screen: img mengisi lebar viewport, tinggi menyesuaikan otomatis ---
     return '''
     <!DOCTYPE html>
     <html>
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Person Tracking + Permanent Lock</title>
+        <title>Person Tracking + Color Re-ID Lock</title>
         <style>
             body { margin: 0; padding: 0; background: black; }
-            img {
-                display: block;
-                width: 100vw;
-                height: 100vh;
-                object-fit: contain;
-            }
+            img { display: block; width: 100vw; height: 100vh; object-fit: contain; }
         </style>
     </head>
-    <body>
-        <img src="/video">
-    </body>
+    <body><img src="/video"></body>
     </html>
     '''
 
