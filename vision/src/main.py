@@ -14,8 +14,6 @@ def mouse_click(event, x, y, flags, param):
     if event == cv2.EVENT_LBUTTONDOWN:
         clicked_coords = (x, y)
 
-
-cv2.namedWindow("YOLOv8 Object Locking")
 cv2.setMouseCallback("YOLOv8 Object Locking", mouse_click)
 
 while cap.isOpened():
