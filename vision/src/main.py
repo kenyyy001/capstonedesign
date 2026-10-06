@@ -1,68 +1,74 @@
 import cv2
-import time
+import os
+from ultralytics import YOLO
 
-# 1. Inisialisasi Kamera
-# Gunakan resolusi rendah (misal: 320x240 atau 640x480) agar beban CPU Orange Pi ringan
+# 1. Manajemen Model (Otomatis konversi ke format ONNX yang ringan untuk CPU)
+pt_model_path = "yolov8n.pt"
+onnx_model_path = "yolov8n.onnx"
+
+# Jika file .onnx belum ada, buat otomatis dari model .pt
+if not os.path.exists(onnx_model_path):
+    print("Mengonversi model ke format ONNX untuk optimasi CPU...")
+    model_init = YOLO(pt_model_path)
+    model_init.export(format="onnx", imgsz=640) # Mengunci resolusi input di 640x640
+
+# Muat model versi ONNX yang sudah dioptimalkan
+model = YOLO(onnx_model_path, task="detect")
+
+# 2. Konfigurasi Kamera OpenCV
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 426)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+# Menggunakan resolusi HD standar (640x480) karena RAM 6GB Anda sangat mumpuni
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-# 2. Membuat Tracker menggunakan sintaks OpenCV Terbaru
-# TrackerKCF sangat direkomendasikan untuk spesifikasi Orange Pi Zero 3W
-tracker = cv2.TrackerKCF.create()
-
-# Ambil frame awal untuk seleksi objek
-success, frame = cap.read()
-if not success:
-    print("Error: Kamera tidak terdeteksi.")
-    cap.release()
+if not cap.isOpened():
+    print("Error: Kamera tidak dapat diakses.")
     exit()
 
-# 3. GUI Seleksi Objek awal
-print("=== PETUNJUK ===")
-print("1. Drag mouse pada objek yang ingin dikunci.")
-print("2. Tekan ENTER atau SPASI untuk konfirmasi lock.")
-bbox = cv2.selectROI("Lock Objek", frame, fromCenter=False, showCrosshair=True)
-
-# Inisialisasi Tracker dengan koordinat objek terpilih
-tracker.init(frame, bbox)
-cv2.destroyWindow("Lock Objek")
-
-# Variabel untuk menghitung FPS secara akurat
-prev_time = 0
+print("Sistem Lock & Tracking Aktif... Tekan 'q' untuk keluar.")
 
 while True:
     success, frame = cap.read()
     if not success:
-        print("Gagal mengambil gambar dari kamera.")
+        print("Gagal membaca frame kamera.")
         break
 
-    # 4. Update Posisi Tracker
-    # Mengembalikan status boolean (True/False) dan tuple koordinat baru
-    is_tracked, bbox = tracker.update(frame)
-    
-    # 5. Visualisasi Hasil Penguncian Objek
-    if is_tracked:
-        # Unpack koordinat kotak pembatas (Bounding Box)
-        x, y, w, h = [int(v) for v in bbox]
-        
-        # Gambar kotak target pengunci (Warna hijau)
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv2.putText(frame, "STATUS: LOCKED", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    # 3. Proses Tracking dengan Algoritma ByteTrack (Ringan & Cepat)
+    # persist=True mengunci ID objek agar tidak tertukar saat bergerak
+    results = model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
+
+    # 4. Filter Objek yang Akan Dikunci (Locking)
+    if results[0].boxes.id is not None:
+        boxes = results[0].boxes.xyxy.int().cpu().tolist()
+        class_ids = results[0].boxes.cls.int().cpu().tolist()
+        track_ids = results[0].boxes.id.int().cpu().tolist()
+
+        for box, class_id, track_id in zip(boxes, class_ids, track_ids):
+            x1, y1, x2, y2 = box
+            nama_objek = model.names[class_id]
+
+            # TARGET LOCK: Silakan ganti 'person' dengan objek lain (misal: 'car', 'dog', 'bottle')
+            if nama_objek == "person":
+                # Hitung titik tengah objek (Center Point) untuk kebutuhan mekanik/robotik ke depan
+                center_x = int((x1 + x2) / 2)
+                center_y = int((y1 + y2) / 2)
+                
+                label_lock = f"LOCKED ID:{track_id} | X:{center_x} Y:{center_y}"
+
+                # Gambar kotak pengunci berwarna MERAH
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                # Gambar titik tengah target (Titik bidik)
+                cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
+                # Tampilkan text koordinat di atas kotak objek
+                cv2.putText(frame, label_lock, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
     else:
-        # Jika objek bergerak terlalu cepat atau terhalang (Warna merah)
-        cv2.putText(frame, "STATUS: TARGET LOST", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        # Jika target lock hilang atau sedang mencari
+        cv2.putText(frame, "STATUS: SEARCHING TARGET...", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    # Menghitung & Menampilkan FPS aktual di Orange Pi
-    current_time = time.time()
-    fps = 1 / (current_time - prev_time) if (current_time - prev_time) > 0 else 0
-    prev_time = current_time
-    cv2.putText(frame, f"FPS: {int(fps)}", (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+    # 5. Tampilkan Visualisasi Tracking
+    cv2.imshow("Orange Pi 6GB - YOLO Tracking", frame)
 
-    # Tampilkan jendela tracking
-    cv2.imshow("OrangePi 3W - Object Tracking", frame)
-
-    # Tekan 'q' untuk keluar
+    # Keluar jika menekan tombol 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
