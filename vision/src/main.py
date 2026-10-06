@@ -65,6 +65,8 @@ while cap.isOpened():
                 # Objek lain yang tidak dikunci (Warna Hijau biasa)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
 
+    cv2.imshow("YOLOv8 Object Locking", frame)
+
     # Tekan 'r' untuk reset lock, atau 'q' untuk keluar
     key = cv2.waitKey(1) & 0xFF
     if key == ord("r"):
