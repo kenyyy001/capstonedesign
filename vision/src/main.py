@@ -65,14 +65,5 @@ while cap.isOpened():
                 # Objek lain yang tidak dikunci (Warna Hijau biasa)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
 
-
-    # Tekan 'r' untuk reset lock, atau 'q' untuk keluar
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord("r"):
-        locked_id = None
-        print("Lock Direset.")
-    elif key == ord("q"):
-        break
-
 cap.release()
 cv2.destroyAllWindows()
