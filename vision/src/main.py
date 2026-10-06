@@ -1,67 +1,61 @@
 import cv2
-from ultralytics import YOLO
 
-model = YOLO("yolov8n.pt")
-cap = cv2.VideoCapture(0)  # Gunakan webcam
+# 1. Inisialisasi Kamera (0 untuk webcam bawaan)
+cap = cv2.VideoCapture(0)
 
-locked_id = None  # Menyimpan ID objek yang dikunci
-clicked_coords = None  # Menyimpan koordinat klik mouse
+# 2. Membuat Tracker (CSRT sangat bagus untuk mengunci satu objek dengan kuat)
+# Catatan: Jika menggunakan OpenCV versi lama, gunakan cv2.TrackerCSRT_create()
+tracker = cv2.TrackerCSRT_create()
 
+# Ambil frame pertama untuk memilih objek yang ingin dikunci
+success, frame = cap.read()
+if not success:
+    print("Gagal membuka kamera.")
+    exit()
 
-# Fungsi callback untuk menangkap klik mouse
-def mouse_click(event, x, y, flags, param):
-    global clicked_coords
-    if event == cv2.EVENT_LBUTTONDOWN:
-        clicked_coords = (x, y)
+# 3. Pilih Objek (Klik & seret mouse untuk membuat kotak, lalu tekan ENTER atau SPACE)
+print("Silakan pilih objek di jendela pop-up, lalu tekan ENTER.")
+bbox = cv2.selectROI("Kunci Objek", frame, fromCenter=False, showCrosshair=True)
 
-while cap.isOpened():
+# Inisialisasi tracker dengan objek yang sudah dipilih
+tracker.init(frame, bbox)
+cv2.destroyWindow("Kunci Objek")
+
+while True:
     success, frame = cap.read()
     if not success:
         break
 
-    # Jalankan tracking bawaan YOLOv8
-    results = model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
+    # 4. Update posisi objek yang dikunci pada frame baru
+    timer = cv2.getTickCount()
+    ret, bbox = tracker.update(frame)
+    
+    # Menghitung Frame Per Second (FPS)
+    fps = cv2.getTickFrequency() / (cv2.getTickCount() - timer)
 
-    if results[0].boxes.id is not None:
-        boxes = results[0].boxes.xyxy.int().cpu().tolist()
-        ids = results[0].boxes.id.int().cpu().tolist()
+    # 5. Jika objek berhasil dilacak, gambar kotak pengunci
+    if ret:
+        # Koordinat kotak: x, y, lebar, tinggi
+        p1 = (int(bbox[0]), int(bbox[1]))
+        p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3]))
+        
+        # Gambar kotak hijau di sekeliling objek
+        cv2.rectangle(frame, p1, p2, (0, 255, 0), 2, 1)
+        cv2.putText(frame, "STATUS: LOCKED", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    else:
+        # Jika objek hilang atau terhalang
+        cv2.putText(frame, "STATUS: LOST", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # Logika 1: Menentukan ID mana yang mau dikunci berdasarkan klik mouse
-        if clicked_coords:
-            cx, cy = clicked_coords
-            for box, obj_id in zip(boxes, ids):
-                x1, y1, x2, y2 = box
-                if x1 <= cx <= x2 and y1 <= cy <= y2:  # Jika klik berada di dalam box
-                    locked_id = obj_id
-                    print(f"Target Terkunci! ID: {locked_id}")
-                    break
-            clicked_coords = None  # Reset klik
+    # Tampilkan info FPS pada layar
+    cv2.putText(frame, f"FPS: {int(fps)}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
-        # Logika 2: Memantau objek yang sedang dikunci
-        for box, obj_id in zip(boxes, ids):
-            x1, y1, x2, y2 = box
-            # Hitung titik tengah target
-            center_x = int((x1 + x2) / 2)
-            center_y = int((y1 + y2) / 2)
+    # Tampilkan hasil tracking ke layar
+    cv2.imshow("Object Tracking & Locking", frame)
 
-            if obj_id == locked_id:
-                # Beri visualisasi khusus untuk objek yang dikunci (Warna Merah)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
-                cv2.putText(
-                    frame,
-                    f"LOCKED ID: {obj_id}",
-                    (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                )
+    # Tekan tombol 'q' untuk keluar dari program
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-                # DI SINI: Kirim data center_x dan center_y ke sistem Anda (misal Gimbal/Servo)
-            else:
-                # Objek lain yang tidak dikunci (Warna Hijau biasa)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
-
+# Lepaskan kamera dan tutup semua jendela jendela
 cap.release()
 cv2.destroyAllWindows()
