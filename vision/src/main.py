@@ -1,61 +1,70 @@
 import cv2
+import time
 
-# 1. Inisialisasi Kamera (0 untuk webcam bawaan)
+# 1. Inisialisasi Kamera
+# Gunakan resolusi rendah (misal: 320x240 atau 640x480) agar beban CPU Orange Pi ringan
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 426)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
-# 2. Membuat Tracker (CSRT sangat bagus untuk mengunci satu objek dengan kuat)
-# Catatan: Jika menggunakan OpenCV versi lama, gunakan cv2.TrackerCSRT_create()
-tracker = cv2.TrackerCSRT_create()
+# 2. Membuat Tracker menggunakan sintaks OpenCV Terbaru
+# TrackerKCF sangat direkomendasikan untuk spesifikasi Orange Pi Zero 3W
+tracker = cv2.TrackerKCF.create()
 
-# Ambil frame pertama untuk memilih objek yang ingin dikunci
+# Ambil frame awal untuk seleksi objek
 success, frame = cap.read()
 if not success:
-    print("Gagal membuka kamera.")
+    print("Error: Kamera tidak terdeteksi.")
+    cap.release()
     exit()
 
-# 3. Pilih Objek (Klik & seret mouse untuk membuat kotak, lalu tekan ENTER atau SPACE)
-print("Silakan pilih objek di jendela pop-up, lalu tekan ENTER.")
-bbox = cv2.selectROI("Kunci Objek", frame, fromCenter=False, showCrosshair=True)
+# 3. GUI Seleksi Objek awal
+print("=== PETUNJUK ===")
+print("1. Drag mouse pada objek yang ingin dikunci.")
+print("2. Tekan ENTER atau SPASI untuk konfirmasi lock.")
+bbox = cv2.selectROI("Lock Objek", frame, fromCenter=False, showCrosshair=True)
 
-# Inisialisasi tracker dengan objek yang sudah dipilih
+# Inisialisasi Tracker dengan koordinat objek terpilih
 tracker.init(frame, bbox)
-cv2.destroyWindow("Kunci Objek")
+cv2.destroyWindow("Lock Objek")
+
+# Variabel untuk menghitung FPS secara akurat
+prev_time = 0
 
 while True:
     success, frame = cap.read()
     if not success:
+        print("Gagal mengambil gambar dari kamera.")
         break
 
-    # 4. Update posisi objek yang dikunci pada frame baru
-    timer = cv2.getTickCount()
-    ret, bbox = tracker.update(frame)
+    # 4. Update Posisi Tracker
+    # Mengembalikan status boolean (True/False) dan tuple koordinat baru
+    is_tracked, bbox = tracker.update(frame)
     
-    # Menghitung Frame Per Second (FPS)
-    fps = cv2.getTickFrequency() / (cv2.getTickCount() - timer)
-
-    # 5. Jika objek berhasil dilacak, gambar kotak pengunci
-    if ret:
-        # Koordinat kotak: x, y, lebar, tinggi
-        p1 = (int(bbox[0]), int(bbox[1]))
-        p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3]))
+    # 5. Visualisasi Hasil Penguncian Objek
+    if is_tracked:
+        # Unpack koordinat kotak pembatas (Bounding Box)
+        x, y, w, h = [int(v) for v in bbox]
         
-        # Gambar kotak hijau di sekeliling objek
-        cv2.rectangle(frame, p1, p2, (0, 255, 0), 2, 1)
-        cv2.putText(frame, "STATUS: LOCKED", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        # Gambar kotak target pengunci (Warna hijau)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(frame, "STATUS: LOCKED", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     else:
-        # Jika objek hilang atau terhalang
-        cv2.putText(frame, "STATUS: LOST", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        # Jika objek bergerak terlalu cepat atau terhalang (Warna merah)
+        cv2.putText(frame, "STATUS: TARGET LOST", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-    # Tampilkan info FPS pada layar
-    cv2.putText(frame, f"FPS: {int(fps)}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+    # Menghitung & Menampilkan FPS aktual di Orange Pi
+    current_time = time.time()
+    fps = 1 / (current_time - prev_time) if (current_time - prev_time) > 0 else 0
+    prev_time = current_time
+    cv2.putText(frame, f"FPS: {int(fps)}", (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-    # Tampilkan hasil tracking ke layar
-    cv2.imshow("Object Tracking & Locking", frame)
+    # Tampilkan jendela tracking
+    cv2.imshow("OrangePi 3W - Object Tracking", frame)
 
-    # Tekan tombol 'q' untuk keluar dari program
+    # Tekan 'q' untuk keluar
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Lepaskan kamera dan tutup semua jendela jendela
 cap.release()
 cv2.destroyAllWindows()
