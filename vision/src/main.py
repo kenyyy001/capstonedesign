@@ -9,7 +9,7 @@ app = Flask(__name__)
 onnx_model_path = "yolov8n.onnx"
 model = YOLO(onnx_model_path, task="detect")
 
-# 2. Konfigurasi Kamera (Resolusi dioptimalkan agar streaming lancar di Wi-Fi)
+# 2. Konfigurasi Kamera (Resolusi HD standar, ramah bandwidth Wi-Fi)
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -23,17 +23,20 @@ def generate_frames():
         # 3. Proses Tracking YOLO (ByteTrack)
         results = model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
 
+        # PERBAIKAN BUG: Ambil indeks pertama [0] dari hasil list YOLO
+        result = results[0]
+
         # 4. Filter Objek & Gambarkan di Frame
-        if results.boxes.id is not None:
-            boxes = results.boxes.xyxy.int().cpu().tolist()
-            class_ids = results.boxes.cls.int().cpu().tolist()
-            track_ids = results.boxes.id.int().cpu().tolist()
+        if result.boxes is not None and result.boxes.id is not None:
+            boxes = result.boxes.xyxy.int().cpu().tolist()
+            class_ids = result.boxes.cls.int().cpu().tolist()
+            track_ids = result.boxes.id.int().cpu().tolist()
 
             for box, class_id, track_id in zip(boxes, class_ids, track_ids):
                 x1, y1, x2, y2 = box
                 nama_objek = model.names[class_id]
 
-                # Kunci objek 'person' (bisa Anda ganti sesuai kebutuhan robot)
+                # Kunci objek 'person' (Manusia)
                 if nama_objek == "person":
                     center_x = int((x1 + x2) / 2)
                     center_y = int((y1 + y2) / 2)
@@ -66,5 +69,4 @@ if __name__ == '__main__':
     print(" Jendela GUI dinonaktifkan. Beralih ke MODE WEB STREAM.")
     print("=======================================================")
     # Menjalankan server Flask agar bisa diakses oleh perangkat satu jaringan WiFi
-    # Port 5000 adalah port default Flask
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
