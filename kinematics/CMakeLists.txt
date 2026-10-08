@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(robot_kinematics)
+project(kinematics)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -22,5 +22,14 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+find_package(rclcpp REQUIRED)
+
+add_executable(kinematics_node src/main.cpp)
+ament_target_dependencies(kinematics_node rclcpp)
+
+install(TARGETS
+  kinematics_node
+  DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
