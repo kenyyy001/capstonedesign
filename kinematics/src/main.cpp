@@ -1,18 +1,18 @@
-#include <Arduino.h>
+#include <rclcpp/rclcpp.hpp>
 
-// put function declarations here:
-int myFunction(int, int);
+class KinematicsNode : public rclcpp::Node
+{
+public:
+  KinematicsNode() : Node("kinematics_node")
+  {
+    RCLCPP_INFO(this->get_logger(), "kinematics_node berjalan (belum ada program)");
+  }
+};
 
-void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
-}
-
-void loop() {
-  // put your main code here, to run repeatedly:
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<KinematicsNode>());
+  rclcpp::shutdown();
+  return 0;
 }
