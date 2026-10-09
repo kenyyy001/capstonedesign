@@ -1,4 +1,3 @@
-```cpp
 #include <Arduino.h>
 
 // =====================================================
@@ -6,16 +5,16 @@
 // =====================================================
 
 // MOTOR 1
-#define M1_IN_A 23
-#define M1_IN_B 19
+#define M1_IN_A 18
+#define M1_IN_B 4
 
 // MOTOR 2
-#define M2_IN_A 18
-#define M2_IN_B 4
+#define M2_IN_A 2
+#define M2_IN_B 13
 
 // MOTOR 3
-#define M3_IN_A 2
-#define M3_IN_B 13
+#define M3_IN_A 27
+#define M3_IN_B 14
 
 
 // =====================================================
