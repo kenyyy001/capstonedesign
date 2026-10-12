@@ -2,8 +2,8 @@
 
 // ===================== PIN =====================
 // Motor 1 = D23 & D19 | Motor 2 = D18 & D4 | Motor 3 = D2 & D13
-const uint8_t IN_A[3] = {23, 18, 2};
-const uint8_t IN_B[3] = {19,  4, 13};
+const uint8_t IN_A[3] = {23, 18, 13};
+const uint8_t IN_B[3] = {19,  4, 2};
 const int N = 3;
 
 // Motor yang sedang dipilih: -1 = semua, 0..2 = motor 1..3
