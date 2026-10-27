@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <math.h>
 
-<<<<<<< HEAD
 // =====================================================
 // 1. PIN MOTOR ESP32
 // =====================================================
@@ -236,6 +235,12 @@ const float PID_LIMIT = 15.0f;
 
 bool robotMoving = false;
 
+// ----- TAMBAHAN: kendali dari ROS2 -----
+float speedScale = 1.0f;                      // 0.0 - 1.0, skala kecepatan dari ROS2
+bool remoteMode = false;                      // true selama perintah V aktif
+unsigned long lastRemoteCmd = 0;
+const unsigned long REMOTE_TIMEOUT_MS = 500;  // tidak ada perintah V selama ini = STOP
+
 
 // =====================================================
 // 16. ENCODER INTERRUPT
@@ -411,6 +416,8 @@ void stopRobot()
 
     resetAllPID();
 
+    speedScale = 1.0f;
+    remoteMode = false;
     robotMoving = false;
 }
 
@@ -474,7 +481,7 @@ void calculateTarget()
         return;
     }
 
-    float scale = MAX_WHEEL_SPEED / maxV;
+    float scale = MAX_WHEEL_SPEED * speedScale / maxV;
 
     targetM1 = absV1 * scale;
     targetM2 = absV2 * scale;
@@ -864,7 +871,6 @@ void setupMotor()
 // 32. SETUP
 // =====================================================
 
-=======
 // ===================== PIN =====================
 // Motor 1 = D23 & D19 | Motor 2 = D18 & D4 | Motor 3 = D2 & D13
 const uint8_t IN_A[3] = {27, 18, 2};
@@ -902,12 +908,11 @@ void printTarget()
 }
 
 // ===================== SETUP =====================
->>>>>>> 27ad1fe9857c328ed200703d2e93def30d834a95
 void setup()
 {
     Serial.begin(115200);
+    Serial.Timeout(20);
 
-<<<<<<< HEAD
     // GPIO34–GPIO39 tidak memiliki pull-up internal.
     // Pastikan rangkaian encoder menyediakan level
     // logika dan pull-up eksternal yang sesuai.
@@ -991,15 +996,19 @@ void loop()
         }
     }
 
-
     // -------------------------------------------------
     // PERINTAH SERIAL
     // -------------------------------------------------
+    // WATCHDOG: kalau perintah dari ROS2 berhenti datang, robot berhenti sendiri
+    if (remoteMode && (millis() - lastRemoteCmd > REMOTE_TIMEOUT_MS))
+    {
+        stopRobot();
+        Serial.println(">>> WATCHDOG: perintah ROS2 hilang, STOP");
+    }
 
     if (Serial.available() > 0)
     {
         char command = Serial.read();
-
 
         // =============================================
         // MAJU
@@ -1280,6 +1289,40 @@ else if (command == 'g' || command == 'G')
         // =============================================
         // STOP
         // =============================================
+        // V vx vy w s  -> perintah dari ROS2 (serial bridge)
+        else if (command == 'v' || command == 'V')
+        {
+            float vx = Serial.parseFloat();
+            float vy = Serial.parseFloat();
+            float w  = Serial.parseFloat();
+            float s  = Serial.parseFloat();
+
+            bool allZero = (fabsf(vx) < 0.0001f &&
+                            fabsf(vy) < 0.0001f &&
+                            fabsf(w)  < 0.0001f);
+
+            if (allZero || s < 0.01f)
+            {
+                stopRobot();
+            }
+            else
+            {
+                if (!robotMoving)
+                    resetAllPID();
+
+                linear_x  = vx;
+                linear_y  = vy;
+                angular_z = w;
+                speedScale = constrain(s, 0.0f, 1.0f);
+
+                inverseKinematics();
+                calculateTarget();
+
+                robotMoving = true;
+                remoteMode = true;
+                lastRemoteCmd = millis();
+            }
+        }
 
         else if (command == 'x' || command == 'X')
         {
@@ -1288,35 +1331,5 @@ else if (command == 'g' || command == 'G')
             Serial.println();
             Serial.println(">>> STOP");
         }
-=======
-    for (int i = 0; i < N; i++) {
-        pinMode(IN_A[i], OUTPUT);
-        pinMode(IN_B[i], OUTPUT);
-    }
-    stopAll();
-
-    Serial.println();
-    Serial.println("=== TEST 3 MOTOR OMNI ===");
-    Serial.println("w = maju | s = mundur | x = stop semua");
-    Serial.println("1 / 2 / 3 = pilih motor | a = semua motor");
-    printTarget();
-}
-
-// ===================== LOOP =====================
-void loop()
-{
-    if (!Serial.available()) return;
-
-    char c = tolower(Serial.read());
-
-    switch (c) {
-        case 'w': run(true);  Serial.println("MAJU");   break;
-        case 's': run(false); Serial.println("MUNDUR"); break;
-        case 'x': stopAll();  Serial.println("STOP");   break;
-        case 'a': stopAll(); selected = -1; printTarget(); break;
-        case '1': case '2': case '3':
-            stopAll(); selected = c - '1'; printTarget(); break;
-        default: break;   // abaikan \r \n
->>>>>>> 27ad1fe9857c328ed200703d2e93def30d834a95
     }
 }
