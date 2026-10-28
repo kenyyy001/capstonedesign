@@ -1,24 +1,39 @@
 #include <Arduino.h>
+#include <math.h>
+#include <Wire.h>
+#include <Adafruit_BNO055.h>
+#include <Adafruit_Sensor.h>
 
 // =====================================================
-// PIN MOTOR
+// BNO055 / I2C CONFIGURATION
+// ESP32 default pins used here: SDA=GPIO21, SCL=GPIO22
+// If the sensor is not detected, try address 0x29.
+// =====================================================
+#define BNO055_SDA_PIN 21
+#define BNO055_SCL_PIN 22
+#define BNO055_I2C_ADDR 0x28
+
+Adafruit_BNO055 bno(55, BNO055_I2C_ADDR, &Wire);
+
+// =====================================================
+// 1. PIN MOTOR ESP32
 // =====================================================
 
 // MOTOR 1
-#define M1_IN_A 18
-#define M1_IN_B 4
+#define M1_IN_A 23
+#define M1_IN_B 19
 
 // MOTOR 2
-#define M2_IN_A 2
-#define M2_IN_B 13
+#define M2_IN_A 18
+#define M2_IN_B 4
 
 // MOTOR 3
-#define M3_IN_A 27
-#define M3_IN_B 14
+#define M3_IN_A 13
+#define M3_IN_B 2
 
 
 // =====================================================
-// PIN ENCODER
+// 2. PIN ENCODER
 // =====================================================
 
 // MOTOR 1
@@ -35,7 +50,7 @@
 
 
 // =====================================================
-// PWM
+// 3. KONFIGURASI PWM
 // =====================================================
 
 #define PWM_FREQ        5000
@@ -52,26 +67,38 @@
 
 
 // =====================================================
-// ENCODER DAN RODA
+// 4. PARAMETER ENCODER DAN RODA
 // =====================================================
 
+// Sesuaikan jika hasil kalibrasi PPR berbeda.
 const int PPR = 1640;
 
-const float WHEEL_RADIUS_CM = 2.9;
+const float WHEEL_RADIUS_CM = 2.9f;
 
 const float WHEEL_CIRCUMFERENCE =
-    2.0 * PI * WHEEL_RADIUS_CM;
+    2.0f * PI * WHEEL_RADIUS_CM;
 
 const float CM_PER_PULSE =
     WHEEL_CIRCUMFERENCE / PPR;
 
 
 // =====================================================
-// INVERSE KINEMATICS
-// MATRKS DARI PROGRAM DOSEN
+// 5. INVERSE KINEMATICS DARI PROGRAM DOSEN
+// =====================================================
+//
+// V3 = -0.3333*x + 0.5774*y + 0.0317*omega
+// V2 = -0.3333*x - 0.5774*y + 0.0317*omega
+// V1 =  0.6667*x             + 0.0317*omega
+//
+// Pemetaan fisik yang digunakan dalam program ini:
+//
+// Motor 1 <- V1
+// Motor 2 <- V2
+// Motor 3 <- V3
+//
 // =====================================================
 
-double matrix_kecepatan[9] =
+const double matrix_kecepatan[9] =
 {
     -0.3333,  0.5774, 0.0317,
     -0.3333, -0.5774, 0.0317,
@@ -80,7 +107,7 @@ double matrix_kecepatan[9] =
 
 
 // =====================================================
-// INPUT ROBOT
+// 6. INPUT GERAK ROBOT
 // =====================================================
 
 double linear_x  = 0.0;
@@ -89,7 +116,30 @@ double angular_z = 0.0;
 
 
 // =====================================================
-// HASIL INVERSE KINEMATICS
+// 6A. BNO055 HEADING HOLD
+// =====================================================
+// angular_z tetap menjadi perintah rotasi manual.
+// headingCorrection ditambahkan ke omega inverse kinematics
+// hanya saat robot melakukan translasi dan heading hold aktif.
+
+bool bnoAvailable = false;
+bool headingHoldEnabled = false;
+float currentYawDeg = 0.0f;
+float targetYawDeg = 0.0f;
+float headingErrorDeg = 0.0f;
+float headingCorrection = 0.0f;
+
+// Nilai awal konservatif; lakukan tuning setelah uji fisik.
+const float HEADING_KP = 0.03f;                // koreksi omega per derajat
+const float HEADING_MAX_CORRECTION = 1.0f;     // batas koreksi omega
+const float HEADING_DEADBAND_DEG = 1.5f;       // toleransi heading
+// BNO055 heading bertambah searah jarum jam, sedangkan angular_z positif
+// pada program ini digunakan untuk putar kiri. Karena itu tanda koreksi dibalik.
+const float HEADING_CORRECTION_SIGN = -1.0f;
+
+
+// =====================================================
+// 7. HASIL INVERSE KINEMATICS
 // =====================================================
 
 double V1 = 0.0;
@@ -98,25 +148,60 @@ double V3 = 0.0;
 
 
 // =====================================================
-// PWM DASAR
+// 8. PENGATURAN KECEPATAN
+// =====================================================
+
+// Kecepatan target roda tercepat.
+// Nilai ini mengikuti skala target 5 cm/s pada
+// Serial Monitor yang kamu kirim.
+
+const float MAX_WHEEL_SPEED = 5.0f;
+
+// PWM dasar maksimum untuk target kecepatan tersebut.
+const int PWM_AT_MAX_SPEED = 80;
+
+
+// =====================================================
+// 9. PWM MINIMUM TIAP MOTOR DAN INPUT DRIVER
+// =====================================================
 //
-// Ganti sesuai hasil kalibrasi motormu.
+// Nilai awal mengikuti konfigurasi sebelumnya.
+// Sesuaikan dengan hasil pengujian fisik.
+//
+// Positif = IN_A mendapatkan PWM
+// Negatif = IN_B mendapatkan PWM
 // =====================================================
 
-const int BASE_PWM_M1 = 55;
-const int BASE_PWM_M2 = 50;
-const int BASE_PWM_M3 = 60;
+// MOTOR 1
+const int PWM_MIN_M1_INA = 75;
+const int PWM_MIN_M1_INB = 55;
+
+// MOTOR 2
+const int PWM_MIN_M2_INA = 50;
+const int PWM_MIN_M2_INB = 50;
+
+// MOTOR 3
+const int PWM_MIN_M3_INA = 60;
+const int PWM_MIN_M3_INB = 60;
 
 
 // =====================================================
-// KECEPATAN MAKSIMUM TARGET
+// 10. STATUS PID
+// =====================================================
+//
+// FALSE untuk sementara agar kita bisa memastikan
+// arah gerakan benar tanpa koreksi berdasarkan
+// feedback encoder yang belum valid.
+//
+// Setelah ketiga encoder terbaca benar, ubah menjadi
+// TRUE untuk mengaktifkan koreksi PID.
 // =====================================================
 
-const float MAX_WHEEL_SPEED = 10.0;
+const bool ENABLE_ENCODER_PID = true;
 
 
 // =====================================================
-// ENCODER COUNTER
+// 11. DATA ENCODER
 // =====================================================
 
 volatile long encoder_count1 = 0;
@@ -125,25 +210,25 @@ volatile long encoder_count3 = 0;
 
 
 // =====================================================
-// KECEPATAN AKTUAL
+// 12. KECEPATAN AKTUAL RODA
 // =====================================================
 
-float speedM1 = 0.0;
-float speedM2 = 0.0;
-float speedM3 = 0.0;
-
-
-// =====================================================
-// TARGET KECEPATAN
-// =====================================================
-
-float targetM1 = 0.0;
-float targetM2 = 0.0;
-float targetM3 = 0.0;
+float speedM1 = 0.0f;
+float speedM2 = 0.0f;
+float speedM3 = 0.0f;
 
 
 // =====================================================
-// PID
+// 13. TARGET KECEPATAN RODA
+// =====================================================
+
+float targetM1 = 0.0f;
+float targetM2 = 0.0f;
+float targetM3 = 0.0f;
+
+
+// =====================================================
+// 14. PARAMETER PID
 // =====================================================
 
 struct PIDController
@@ -159,58 +244,37 @@ struct PIDController
 };
 
 
+// Nilai awal. Belum merupakan hasil tuning final.
 PIDController pid1 =
 {
-    2.5,
-    0.2,
-    0.02,
-
-    0.0,
-    0.0,
-    0.0
+    1.5f, 0.1f, 0.0f,
+    0.0f, 0.0f, 0.0f
 };
-
 
 PIDController pid2 =
 {
-    2.5,
-    0.2,
-    0.02,
-
-    0.0,
-    0.0,
-    0.0
+    1.5f, 0.1f, 0.0f,
+    0.0f, 0.0f, 0.0f
 };
-
 
 PIDController pid3 =
 {
-    2.5,
-    0.2,
-    0.02,
-
-    0.0,
-    0.0,
-    0.0
+    1.5f, 0.1f, 0.0f,
+    0.0f, 0.0f, 0.0f
 };
 
-
-// =====================================================
-// MAKSIMUM KOREKSI PID
-// =====================================================
-
-const float PID_LIMIT = 20.0;
+const float PID_LIMIT = 15.0f;
 
 
 // =====================================================
-// STATUS ROBOT
+// 15. STATUS ROBOT
 // =====================================================
 
 bool robotMoving = false;
 
 
 // =====================================================
-// ENCODER INTERRUPT
+// 16. ENCODER INTERRUPT
 // =====================================================
 
 void IRAM_ATTR encoderISR1()
@@ -250,14 +314,14 @@ void IRAM_ATTR encoderISR3()
 
 
 // =====================================================
-// RESET PID
+// 17. RESET PID
 // =====================================================
 
 void resetPID(PIDController &pid)
 {
-    pid.integral = 0.0;
-    pid.lastError = 0.0;
-    pid.output = 0.0;
+    pid.integral = 0.0f;
+    pid.lastError = 0.0f;
+    pid.output = 0.0f;
 }
 
 
@@ -270,32 +334,197 @@ void resetAllPID()
 
 
 // =====================================================
-// MOTOR PWM
+// 18. FUNGSI ARAH
+// =====================================================
+
+int signOf(double value)
+{
+    if (value > 0.0001)
+        return 1;
+
+    if (value < -0.0001)
+        return -1;
+
+    return 0;
+}
+
+
+// =====================================================
+// 18A. FUNGSI BNO055 DAN KOREKSI HEADING
+// =====================================================
+
+float wrapAngle180(float angleDeg)
+{
+    while (angleDeg > 180.0f) angleDeg -= 360.0f;
+    while (angleDeg < -180.0f) angleDeg += 360.0f;
+    return angleDeg;
+}
+
+bool readBNOYaw()
+{
+    if (!bnoAvailable)
+        return false;
+
+    // VECTOR_EULER.x() adalah heading/yaw dalam derajat.
+    imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+    float heading = euler.x();
+
+    if (!isfinite((double)heading))
+        return false;
+
+    while (heading >= 360.0f) heading -= 360.0f;
+    while (heading < 0.0f) heading += 360.0f;
+
+    currentYawDeg = heading;
+    return true;
+}
+
+void setupBNO055()
+{
+    Wire.begin(BNO055_SDA_PIN, BNO055_SCL_PIN);
+    Wire.setClock(100000);  // I2C 100 kHz untuk pengujian awal
+    // BNO055 memerlukan waktu startup sebelum komunikasi I2C siap.
+    delay(700);
+
+    Serial.println();
+    Serial.println("Inisialisasi BNO055...");
+
+    if (!bno.begin())
+    {
+        bnoAvailable = false;
+        headingHoldEnabled = false;
+        headingCorrection = 0.0f;
+        Serial.println("PERINGATAN: BNO055 tidak terdeteksi pada alamat 0x28.");
+        Serial.println("Periksa kabel SDA/SCL/VCC/GND atau coba alamat 0x29.");
+        Serial.println("Robot tetap bisa bergerak tanpa koreksi heading IMU.");
+        return;
+    }
+
+    bnoAvailable = true;
+    bno.setExtCrystalUse(true);
+    delay(100);
+    readBNOYaw();
+
+    Serial.println("BNO055 terdeteksi.");
+    Serial.print("Heading awal = ");
+    Serial.print(currentYawDeg, 2);
+    Serial.println(" deg");
+}
+
+void startHeadingHold()
+{
+    headingCorrection = 0.0f;
+    headingErrorDeg = 0.0f;
+
+    // Jika perintah translasi dikirim berulang dari komputer/Orange Pi,
+    // jangan menggeser target yaw pada setiap pesan. Target hanya diambil
+    // ketika heading hold baru diaktifkan (setelah STOP atau putar manual).
+    if (headingHoldEnabled && bnoAvailable)
+    {
+        readBNOYaw();
+        return;
+    }
+
+    if (readBNOYaw())
+    {
+        targetYawDeg = currentYawDeg;
+        headingHoldEnabled = true;
+        Serial.print("Heading hold aktif. Target yaw = ");
+        Serial.print(targetYawDeg, 2);
+        Serial.println(" deg");
+    }
+    else
+    {
+        headingHoldEnabled = false;
+        Serial.println("Heading hold tidak aktif: BNO055 belum tersedia.");
+    }
+}
+
+void disableHeadingHold()
+{
+    headingHoldEnabled = false;
+    headingCorrection = 0.0f;
+    headingErrorDeg = 0.0f;
+}
+
+void updateHeadingController()
+{
+    if (!bnoAvailable)
+    {
+        headingCorrection = 0.0f;
+        headingErrorDeg = 0.0f;
+        return;
+    }
+
+    // Tetap perbarui pembacaan yaw pada saat putar manual untuk diagnosis Serial.
+    if (!readBNOYaw())
+    {
+        headingCorrection = 0.0f;
+        return;
+    }
+
+    if (!headingHoldEnabled)
+    {
+        headingCorrection = 0.0f;
+        headingErrorDeg = 0.0f;
+        return;
+    }
+
+    // Error terbungkus ke -180..+180 agar tidak salah arah melintasi 0/360 deg.
+    headingErrorDeg = wrapAngle180(targetYawDeg - currentYawDeg);
+
+    if (fabsf(headingErrorDeg) <= HEADING_DEADBAND_DEG)
+    {
+        headingCorrection = 0.0f;
+    }
+    else
+    {
+        headingCorrection = HEADING_CORRECTION_SIGN * HEADING_KP * headingErrorDeg;
+        headingCorrection = constrain(
+            headingCorrection,
+            -HEADING_MAX_CORRECTION,
+            HEADING_MAX_CORRECTION
+        );
+    }
+}
+
+
+// =====================================================
+// 19. KENDALI PWM MOTOR
+// =====================================================
+//
+// PWM positif:
+// IN_A = PWM
+// IN_B = 0
+//
+// PWM negatif:
+// IN_A = 0
+// IN_B = PWM
+//
+// PWM nol:
+// Kedua input = 0
 // =====================================================
 
 void setMotorPWM(
     int channelA,
     int channelB,
-    float pwm)
+    float signedPWM)
 {
-    float value = abs(pwm);
+    int pwm = (int)fabsf(signedPWM);
 
-    if (value > 255)
-        value = 255;
+    if (pwm > 255)
+        pwm = 255;
 
-
-    if (pwm > 0)
+    if (signedPWM > 0.0f)
     {
-        ledcWrite(channelA, (int)value);
+        ledcWrite(channelA, pwm);
         ledcWrite(channelB, 0);
     }
-
-    else if (pwm < 0)
+    else if (signedPWM < 0.0f)
     {
         ledcWrite(channelA, 0);
-        ledcWrite(channelB, (int)value);
+        ledcWrite(channelB, pwm);
     }
-
     else
     {
         ledcWrite(channelA, 0);
@@ -305,7 +534,7 @@ void setMotorPWM(
 
 
 // =====================================================
-// MOTOR 1
+// 20. MOTOR 1
 // =====================================================
 
 void motor1(float pwm)
@@ -315,7 +544,7 @@ void motor1(float pwm)
 
 
 // =====================================================
-// MOTOR 2
+// 21. MOTOR 2
 // =====================================================
 
 void motor2(float pwm)
@@ -325,7 +554,7 @@ void motor2(float pwm)
 
 
 // =====================================================
-// MOTOR 3
+// 22. MOTOR 3
 // =====================================================
 
 void motor3(float pwm)
@@ -335,7 +564,7 @@ void motor3(float pwm)
 
 
 // =====================================================
-// STOP
+// 23. STOP ROBOT
 // =====================================================
 
 void stopRobot()
@@ -344,9 +573,18 @@ void stopRobot()
     motor2(0);
     motor3(0);
 
-    targetM1 = 0;
-    targetM2 = 0;
-    targetM3 = 0;
+    linear_x = 0.0;
+    linear_y = 0.0;
+    angular_z = 0.0;
+    disableHeadingHold();
+
+    V1 = 0.0;
+    V2 = 0.0;
+    V3 = 0.0;
+
+    targetM1 = 0.0f;
+    targetM2 = 0.0f;
+    targetM3 = 0.0f;
 
     resetAllPID();
 
@@ -355,90 +593,88 @@ void stopRobot()
 
 
 // =====================================================
-// INVERSE KINEMATICS
+// 24. INVERSE KINEMATICS
 // =====================================================
 
 void inverseKinematics()
 {
-    V3 =
-        matrix_kecepatan[0] * linear_x +
-        matrix_kecepatan[1] * linear_y +
-        matrix_kecepatan[2] * angular_z;
+    // Saat translasi, headingCorrection menghasilkan omega koreksi.
+    // Saat perintah putar manual, heading hold dimatikan sehingga koreksi = 0.
+    const double effectiveOmega = angular_z + headingCorrection;
 
+    V3 =
+        matrix_kecepatan[0] * linear_x
+      + matrix_kecepatan[1] * linear_y
+      + matrix_kecepatan[2] * effectiveOmega;
 
     V2 =
-        matrix_kecepatan[3] * linear_x +
-        matrix_kecepatan[4] * linear_y +
-        matrix_kecepatan[5] * angular_z;
-
+        matrix_kecepatan[3] * linear_x
+      + matrix_kecepatan[4] * linear_y
+      + matrix_kecepatan[5] * effectiveOmega;
 
     V1 =
-        matrix_kecepatan[6] * linear_x +
-        matrix_kecepatan[7] * linear_y +
-        matrix_kecepatan[8] * angular_z;
+        matrix_kecepatan[6] * linear_x
+      + matrix_kecepatan[7] * linear_y
+      + matrix_kecepatan[8] * effectiveOmega;
 }
 
 
 // =====================================================
-// HITUNG TARGET KECEPATAN RODA
+// 25. HITUNG TARGET KECEPATAN
+// =====================================================
 //
-// Motor 1 <- V3
+// PENTING:
+//
+// Motor 1 <- V1
 // Motor 2 <- V2
-// Motor 3 <- V1
+// Motor 3 <- V3
 //
-// Untuk rotasi murni:
-//
-// V1 = 0.0317 * angular_z
-// V2 = 0.0317 * angular_z
-// V3 = 0.0317 * angular_z
-//
-// Jadi ketiga roda mempunyai besar kecepatan
-// yang sama saat rotasi.
+// Target dinormalisasi sehingga roda dengan nilai
+// absolut V terbesar memiliki target MAX_WHEEL_SPEED.
 // =====================================================
 
 void calculateTarget()
 {
-    float maxV =
-        max(
-            max(
-                (float)abs(V1),
-                (float)abs(V2)
-            ),
-            (float)abs(V3)
-        );
+    float absV1 = fabsf((float)V1);
+    float absV2 = fabsf((float)V2);
+    float absV3 = fabsf((float)V3);
 
+    float maxV = absV1;
 
-    if (maxV < 0.001)
+    if (absV2 > maxV)
+        maxV = absV2;
+
+    if (absV3 > maxV)
+        maxV = absV3;
+
+    if (maxV < 0.0001f)
     {
-        targetM1 = 0;
-        targetM2 = 0;
-        targetM3 = 0;
-
+        targetM1 = 0.0f;
+        targetM2 = 0.0f;
+        targetM3 = 0.0f;
         return;
     }
 
+    float scale = MAX_WHEEL_SPEED / maxV;
 
-    float scale =
-        MAX_WHEEL_SPEED / maxV;
-
-
-    // Pemetaan fisik
-    targetM1 = abs(V3) * scale;
-    targetM2 = abs(V2) * scale;
-    targetM3 = abs(V1) * scale;
+    targetM1 = absV1 * scale;
+    targetM2 = absV2 * scale;
+    targetM3 = absV3 * scale;
 }
 
 
 // =====================================================
-// BACA KECEPATAN ENCODER
+// 26. BACA KECEPATAN ENCODER
 // =====================================================
 
 void updateEncoderSpeed(float dt)
 {
+    if (dt <= 0.001f)
+        return;
+
     long c1;
     long c2;
     long c3;
-
 
     noInterrupts();
 
@@ -452,28 +688,76 @@ void updateEncoderSpeed(float dt)
 
     interrupts();
 
-
     speedM1 =
-        abs(c1) *
-        CM_PER_PULSE /
-        dt;
-
+        fabsf((float)c1) * CM_PER_PULSE / dt;
 
     speedM2 =
-        abs(c2) *
-        CM_PER_PULSE /
-        dt;
-
+        fabsf((float)c2) * CM_PER_PULSE / dt;
 
     speedM3 =
-        abs(c3) *
-        CM_PER_PULSE /
-        dt;
+        fabsf((float)c3) * CM_PER_PULSE / dt;
 }
 
 
 // =====================================================
-// PID
+// 27. PEMILIH PWM MINIMUM
+// =====================================================
+
+int getMinimumPWM(int motorNumber, int direction)
+{
+    // direction positif menggunakan IN_A
+    // direction negatif menggunakan IN_B
+
+    if (motorNumber == 1)
+    {
+        return (direction > 0)
+            ? PWM_MIN_M1_INA
+            : PWM_MIN_M1_INB;
+    }
+
+    if (motorNumber == 2)
+    {
+        return (direction > 0)
+            ? PWM_MIN_M2_INA
+            : PWM_MIN_M2_INB;
+    }
+
+    return (direction > 0)
+        ? PWM_MIN_M3_INA
+        : PWM_MIN_M3_INB;
+}
+
+
+// =====================================================
+// 28. KONVERSI TARGET KE PWM DASAR
+// =====================================================
+
+float targetToPWM(float target, int minimumPWM)
+{
+    if (target <= 0.01f)
+        return 0.0f;
+
+    float ratio = target / MAX_WHEEL_SPEED;
+
+    if (ratio > 1.0f)
+        ratio = 1.0f;
+
+    if (ratio < 0.0f)
+        ratio = 0.0f;
+
+    float pwm =
+        minimumPWM
+      + ratio * (PWM_AT_MAX_SPEED - minimumPWM);
+
+    if (pwm > 255.0f)
+        pwm = 255.0f;
+
+    return pwm;
+}
+
+
+// =====================================================
+// 29. PID
 // =====================================================
 
 float updatePID(
@@ -482,169 +766,174 @@ float updatePID(
     float actual,
     float dt)
 {
-    float error =
-        target - actual;
+    if (target <= 0.01f || dt <= 0.001f)
+    {
+        resetPID(pid);
+        return 0.0f;
+    }
 
+    float error = target - actual;
 
-    // Integral
-    pid.integral +=
-        error * dt;
+    pid.integral += error * dt;
 
+    // Anti-windup
+    if (pid.integral > 30.0f)
+        pid.integral = 30.0f;
 
-    // Anti wind-up
-    if (pid.integral > 30)
-        pid.integral = 30;
+    if (pid.integral < -30.0f)
+        pid.integral = -30.0f;
 
-    if (pid.integral < -30)
-        pid.integral = -30;
-
-
-    // Derivative
     float derivative =
         (error - pid.lastError) / dt;
 
-
-    // PID
     pid.output =
-        (pid.Kp * error) +
-        (pid.Ki * pid.integral) +
-        (pid.Kd * derivative);
+        pid.Kp * error
+      + pid.Ki * pid.integral
+      + pid.Kd * derivative;
 
-
-    // Batasi koreksi
     if (pid.output > PID_LIMIT)
         pid.output = PID_LIMIT;
 
     if (pid.output < -PID_LIMIT)
         pid.output = -PID_LIMIT;
 
-
     pid.lastError = error;
-
 
     return pid.output;
 }
 
 
 // =====================================================
-// DRIVE ROBOT
+// 30. KENDALI SEMUA MOTOR
 // =====================================================
 
 void driveRobot(float dt)
 {
-    // =================================================
-    // PWM DASAR
-    // =================================================
+    // -------------------------------------------------
+    // Tentukan arah dari hasil inverse kinematics.
+    // Tidak ada pembalikan polaritas tambahan.
+    // -------------------------------------------------
 
-    float pwmM1 = BASE_PWM_M1;
-    float pwmM2 = BASE_PWM_M2;
-    float pwmM3 = BASE_PWM_M3;
-
-
-    // =================================================
-    // PID
-    // =================================================
-
-    float correctionM1 =
-        updatePID(
-            pid1,
-            targetM1,
-            speedM1,
-            dt
-        );
+    int dir1 = signOf(V1);
+    int dir2 = signOf(V2);
+    int dir3 = signOf(V3);
 
 
-    float correctionM2 =
-        updatePID(
-            pid2,
-            targetM2,
-            speedM2,
-            dt
-        );
+    // -------------------------------------------------
+    // Target nol berarti motor wajib berhenti.
+    // -------------------------------------------------
 
-
-    float correctionM3 =
-        updatePID(
-            pid3,
-            targetM3,
-            speedM3,
-            dt
-        );
-
-
-    // =================================================
-    // KOREKSI PID
-    // =================================================
-
-    pwmM1 += correctionM1;
-    pwmM2 += correctionM2;
-    pwmM3 += correctionM3;
-
-
-    // =================================================
-    // BATAS PWM
-    // =================================================
-
-    if (pwmM1 < 0)
-        pwmM1 = 0;
-
-    if (pwmM2 < 0)
-        pwmM2 = 0;
-
-    if (pwmM3 < 0)
-        pwmM3 = 0;
-
-
-    if (pwmM1 > 255)
-        pwmM1 = 255;
-
-    if (pwmM2 > 255)
-        pwmM2 = 255;
-
-    if (pwmM3 > 255)
-        pwmM3 = 255;
-
-
-    // =================================================
-    // ARAH MOTOR
-    // =================================================
-
-    // Motor 1 <- V3
-    if (V3 < 0)
-        motor1(-pwmM1);
-
-    else if (V3 > 0)
-        motor1(pwmM1);
-
-    else
+    if (targetM1 <= 0.01f || dir1 == 0)
+    {
         motor1(0);
+        resetPID(pid1);
+    }
 
-
-    // Motor 2 <- V2
-    if (V2 < 0)
-        motor2(-pwmM2);
-
-    else if (V2 > 0)
-        motor2(pwmM2);
-
-    else
+    if (targetM2 <= 0.01f || dir2 == 0)
+    {
         motor2(0);
+        resetPID(pid2);
+    }
 
-
-    // Motor 3 <- V1
-    if (V1 < 0)
-        motor3(-pwmM3);
-
-    else if (V1 > 0)
-        motor3(pwmM3);
-
-    else
+    if (targetM3 <= 0.01f || dir3 == 0)
+    {
         motor3(0);
+        resetPID(pid3);
+    }
 
 
-    // =================================================
-    // MONITORING
-    // =================================================
+    // -------------------------------------------------
+    // Tentukan PWM minimum berdasarkan arah driver.
+    // -------------------------------------------------
+
+    int minPWM1 = getMinimumPWM(1, dir1);
+    int minPWM2 = getMinimumPWM(2, dir2);
+    int minPWM3 = getMinimumPWM(3, dir3);
+
+
+    // -------------------------------------------------
+    // PWM dasar dari target kecepatan.
+    // -------------------------------------------------
+
+    float pwmBase1 =
+        targetToPWM(targetM1, minPWM1);
+
+    float pwmBase2 =
+        targetToPWM(targetM2, minPWM2);
+
+    float pwmBase3 =
+        targetToPWM(targetM3, minPWM3);
+
+
+    // -------------------------------------------------
+    // PID hanya dipakai jika diaktifkan.
+    // Untuk pengujian arah, default-nya OFF.
+    // -------------------------------------------------
+
+    float correction1 = 0.0f;
+    float correction2 = 0.0f;
+    float correction3 = 0.0f;
+
+    if (ENABLE_ENCODER_PID)
+    {
+        correction1 =
+            updatePID(pid1, targetM1, speedM1, dt);
+
+        correction2 =
+            updatePID(pid2, targetM2, speedM2, dt);
+
+        correction3 =
+            updatePID(pid3, targetM3, speedM3, dt);
+    }
+
+
+    // -------------------------------------------------
+    // PWM akhir.
+    // -------------------------------------------------
+
+    float pwm1 = pwmBase1 + correction1;
+    float pwm2 = pwmBase2 + correction2;
+    float pwm3 = pwmBase3 + correction3;
+
+
+    // Motor aktif dipertahankan di atas PWM minimum.
+    if (targetM1 > 0.01f && pwm1 < minPWM1)
+        pwm1 = minPWM1;
+
+    if (targetM2 > 0.01f && pwm2 < minPWM2)
+        pwm2 = minPWM2;
+
+    if (targetM3 > 0.01f && pwm3 < minPWM3)
+        pwm3 = minPWM3;
+
+
+    // Batasi PWM
+    pwm1 = constrain(pwm1, 0.0f, 255.0f);
+    pwm2 = constrain(pwm2, 0.0f, 255.0f);
+    pwm3 = constrain(pwm3, 0.0f, 255.0f);
+
+
+    // -------------------------------------------------
+    // ARAH DAN PWM MOTOR
+    //
+    // Motor 1 mengikuti V1
+    // Motor 2 mengikuti V2
+    // Motor 3 mengikuti V3
+    // -------------------------------------------------
+
+    if (targetM1 > 0.01f)
+        motor1(dir1 * pwm1);
+
+    if (targetM2 > 0.01f)
+        motor2(dir2 * pwm2);
+
+    if (targetM3 > 0.01f)
+        motor3(-dir3 * pwm3);
+
+
+    // -------------------------------------------------
+    // SERIAL MONITOR
+    // -------------------------------------------------
 
     static unsigned long lastPrint = 0;
 
@@ -653,124 +942,147 @@ void driveRobot(float dt)
         lastPrint = millis();
 
         Serial.println();
-        Serial.println("========== DATA ==========");
+        Serial.println("========== ROBOT MONITOR ==========");
 
-        Serial.print("X = ");
+        Serial.print("linear_x = ");
         Serial.println(linear_x, 3);
 
-        Serial.print("Y = ");
+        Serial.print("linear_y = ");
         Serial.println(linear_y, 3);
 
-        Serial.print("Omega = ");
+        Serial.print("angular_z command = ");
         Serial.println(angular_z, 3);
+
+        Serial.print("BNO055 = ");
+        Serial.println(bnoAvailable ? "TERDETEKSI" : "TIDAK TERDETEKSI");
+        if (bnoAvailable)
+        {
+            Serial.print("Yaw sekarang = ");
+            Serial.print(currentYawDeg, 2);
+            Serial.println(" deg");
+            Serial.print("Yaw target = ");
+            Serial.print(targetYawDeg, 2);
+            Serial.println(" deg");
+            Serial.print("Error heading = ");
+            Serial.print(headingErrorDeg, 2);
+            Serial.println(" deg");
+            Serial.print("Koreksi heading = ");
+            Serial.println(headingCorrection, 3);
+            Serial.print("Heading hold = ");
+            Serial.println(headingHoldEnabled ? "AKTIF" : "NONAKTIF");
+
+            uint8_t calSys = 0, calGyro = 0, calAccel = 0, calMag = 0;
+            bno.getCalibration(&calSys, &calGyro, &calAccel, &calMag);
+            Serial.print("Kalibrasi Sys/Gyro/Accel/Mag = ");
+            Serial.print(calSys); Serial.print("/");
+            Serial.print(calGyro); Serial.print("/");
+            Serial.print(calAccel); Serial.print("/");
+            Serial.println(calMag);
+        }
 
         Serial.println();
 
         Serial.print("V1 = ");
-        Serial.println(V1, 3);
+        Serial.println(V1, 4);
 
         Serial.print("V2 = ");
-        Serial.println(V2, 3);
+        Serial.println(V2, 4);
 
         Serial.print("V3 = ");
-        Serial.println(V3, 3);
+        Serial.println(V3, 4);
 
         Serial.println();
 
         Serial.print("Target M1 = ");
-        Serial.println(targetM1);
+        Serial.print(targetM1, 2);
+        Serial.println(" cm/s");
 
         Serial.print("Target M2 = ");
-        Serial.println(targetM2);
+        Serial.print(targetM2, 2);
+        Serial.println(" cm/s");
 
         Serial.print("Target M3 = ");
-        Serial.println(targetM3);
+        Serial.print(targetM3, 2);
+        Serial.println(" cm/s");
 
         Serial.println();
 
         Serial.print("Speed M1 = ");
-        Serial.print(speedM1);
+        Serial.print(speedM1, 2);
         Serial.println(" cm/s");
 
         Serial.print("Speed M2 = ");
-        Serial.print(speedM2);
+        Serial.print(speedM2, 2);
         Serial.println(" cm/s");
 
         Serial.print("Speed M3 = ");
-        Serial.print(speedM3);
+        Serial.print(speedM3, 2);
         Serial.println(" cm/s");
-
-        Serial.println();
-
-        Serial.print("PID M1 = ");
-        Serial.println(correctionM1);
-
-        Serial.print("PID M2 = ");
-        Serial.println(correctionM2);
-
-        Serial.print("PID M3 = ");
-        Serial.println(correctionM3);
 
         Serial.println();
 
         Serial.print("PWM M1 = ");
-        Serial.println(pwmM1);
+        Serial.println(pwm1, 1);
 
         Serial.print("PWM M2 = ");
-        Serial.println(pwmM2);
+        Serial.println(pwm2, 1);
 
         Serial.print("PWM M3 = ");
-        Serial.println(pwmM3);
+        Serial.println(pwm3, 1);
 
-        Serial.println("==========================");
+        Serial.println("===================================");
     }
 }
 
 
 // =====================================================
-// SETUP MOTOR
+// 31. SETUP PWM
 // =====================================================
 
 void setupMotor()
 {
-    // MOTOR 1
+    // Motor 1
     ledcSetup(M1_CH_A, PWM_FREQ, PWM_RESOLUTION);
     ledcSetup(M1_CH_B, PWM_FREQ, PWM_RESOLUTION);
 
     ledcAttachPin(M1_IN_A, M1_CH_A);
     ledcAttachPin(M1_IN_B, M1_CH_B);
 
-
-    // MOTOR 2
+    // Motor 2
     ledcSetup(M2_CH_A, PWM_FREQ, PWM_RESOLUTION);
     ledcSetup(M2_CH_B, PWM_FREQ, PWM_RESOLUTION);
 
     ledcAttachPin(M2_IN_A, M2_CH_A);
     ledcAttachPin(M2_IN_B, M2_CH_B);
 
-
-    // MOTOR 3
+    // Motor 3
     ledcSetup(M3_CH_A, PWM_FREQ, PWM_RESOLUTION);
     ledcSetup(M3_CH_B, PWM_FREQ, PWM_RESOLUTION);
 
     ledcAttachPin(M3_IN_A, M3_CH_A);
     ledcAttachPin(M3_IN_B, M3_CH_B);
 
-
-    stopRobot();
+    motor1(0);
+    motor2(0);
+    motor3(0);
 }
 
 
 // =====================================================
-// SETUP
+// 32. SETUP
 // =====================================================
 
 void setup()
 {
     Serial.begin(115200);
+    delay(300);
 
+    setupBNO055();
 
-    // Encoder
+    // GPIO34–GPIO39 tidak memiliki pull-up internal.
+    // Pastikan rangkaian encoder menyediakan level
+    // logika dan pull-up eksternal yang sesuai.
+
     pinMode(ENC1_A, INPUT);
     pinMode(ENC1_B, INPUT);
 
@@ -780,8 +1092,6 @@ void setup()
     pinMode(ENC3_A, INPUT);
     pinMode(ENC3_B, INPUT);
 
-
-    // Interrupt
     attachInterrupt(
         digitalPinToInterrupt(ENC1_A),
         encoderISR1,
@@ -800,26 +1110,34 @@ void setup()
         CHANGE
     );
 
-
     setupMotor();
 
+Serial.println("======================================");
+Serial.println(" OMNI ROBOT 3 RODA");
+Serial.println(" HOLONOMIC + ENCODER PID + BNO055 HEADING HOLD");
+Serial.println("======================================");
+Serial.println("W = MAJU (+Y)");
+Serial.println("S = MUNDUR (-Y)");
+Serial.println("Q = TRANSLASI X POSITIF (+X)");
+Serial.println("E = TRANSLASI X NEGATIF (-X)");
+Serial.println("R = DIAGONAL MAJU + X POSITIF");
+Serial.println("T = DIAGONAL MAJU + X NEGATIF");
+Serial.println("F = DIAGONAL MUNDUR + X POSITIF");
+Serial.println("G = DIAGONAL MUNDUR + X NEGATIF");
+Serial.println("A = PUTAR KIRI");
+Serial.println("D = PUTAR KANAN");
+Serial.println("X = STOP");
+Serial.println("======================================");
 
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println(" OMNI ROBOT");
-    Serial.println(" IK + ENCODER + PID + ANGULAR MOTION");
-    Serial.println("========================================");
-    Serial.println("W = MAJU");
-    Serial.println("S = MUNDUR");
-    Serial.println("A = PUTAR KIRI");
-    Serial.println("D = PUTAR KANAN");
-    Serial.println("X = STOP");
-    Serial.println("========================================");
+    Serial.print("Encoder PID: ");
+    Serial.println(
+        ENABLE_ENCODER_PID ? "AKTIF" : "NONAKTIF"
+    );
 }
 
 
 // =====================================================
-// LOOP
+// 33. LOOP
 // =====================================================
 
 void loop()
@@ -828,34 +1146,29 @@ void loop()
 
     unsigned long now = millis();
 
-
-    // =================================================
-    // UPDATE PID SETIAP 50 ms
-    // =================================================
-
+    // Sampling encoder dan PID setiap 50 ms.
     if (now - lastPIDTime >= 50)
     {
         float dt =
-            (now - lastPIDTime) / 1000.0;
+            (now - lastPIDTime) / 1000.0f;
 
         lastPIDTime = now;
 
-
-        // Baca encoder
         updateEncoderSpeed(dt);
 
-
-        // Jalankan PID
         if (robotMoving)
         {
+            updateHeadingController();
+            inverseKinematics();
+            calculateTarget();
             driveRobot(dt);
         }
     }
 
 
-    // =================================================
-    // SERIAL COMMAND
-    // =================================================
+    // -------------------------------------------------
+    // PERINTAH SERIAL
+    // -------------------------------------------------
 
     if (Serial.available() > 0)
     {
@@ -864,28 +1177,37 @@ void loop()
 
         // =============================================
         // MAJU
+        //
+        // Menggunakan sumbu Y karena konfigurasi yang
+        // diinginkan adalah Motor 1 berhenti ketika
+        // robot bergerak maju lurus.
         // =============================================
 
-        if (command == 'w' ||
-            command == 'W')
+        if (command == 'w' || command == 'W')
         {
-            linear_x = 0.5;
-            linear_y = 0.0;
+            linear_x = 0.0;
+            linear_y = 0.5;
             angular_z = 0.0;
 
-
+            startHeadingHold();
             resetAllPID();
-
 
             inverseKinematics();
             calculateTarget();
 
-
             robotMoving = true;
-
 
             Serial.println();
             Serial.println(">>> MAJU");
+
+            Serial.print("V1 = ");
+            Serial.println(V1, 4);
+
+            Serial.print("V2 = ");
+            Serial.println(V2, 4);
+
+            Serial.print("V3 = ");
+            Serial.println(V3, 4);
         }
 
 
@@ -893,86 +1215,249 @@ void loop()
         // MUNDUR
         // =============================================
 
-        else if (command == 's' ||
-                 command == 'S')
+        else if (command == 's' || command == 'S')
         {
-            linear_x = -0.5;
-            linear_y = 0.0;
+            linear_x = 0.0;
+            linear_y = -0.5;
             angular_z = 0.0;
 
-
+            startHeadingHold();
             resetAllPID();
-
 
             inverseKinematics();
             calculateTarget();
 
-
             robotMoving = true;
-
 
             Serial.println();
             Serial.println(">>> MUNDUR");
+
+            Serial.print("V1 = ");
+            Serial.println(V1, 4);
+
+            Serial.print("V2 = ");
+            Serial.println(V2, 4);
+
+            Serial.print("V3 = ");
+            Serial.println(V3, 4);
         }
+
+// =============================================
+// TRANSLASI SUMBU X POSITIF
+// =============================================
+
+else if (command == 'q' || command == 'Q')
+{
+    linear_x = 0.5;
+    linear_y = 0.0;
+    angular_z = 0.0;
+
+    startHeadingHold();
+    resetAllPID();
+
+    inverseKinematics();
+    calculateTarget();
+
+    robotMoving = true;
+
+    Serial.println();
+    Serial.println(">>> TRANSLASI X POSITIF");
+
+    Serial.print("V1 = ");
+    Serial.println(V1, 4);
+
+    Serial.print("V2 = ");
+    Serial.println(V2, 4);
+
+    Serial.print("V3 = ");
+    Serial.println(V3, 4);
+}
+
+
+// =============================================
+// TRANSLASI SUMBU X NEGATIF
+// =============================================
+
+else if (command == 'e' || command == 'E')
+{
+    linear_x = -0.5;
+    linear_y = 0.0;
+    angular_z = 0.0;
+
+    startHeadingHold();
+    resetAllPID();
+
+    inverseKinematics();
+    calculateTarget();
+
+    robotMoving = true;
+
+    Serial.println();
+    Serial.println(">>> TRANSLASI X NEGATIF");
+
+    Serial.print("V1 = ");
+    Serial.println(V1, 4);
+
+    Serial.print("V2 = ");
+    Serial.println(V2, 4);
+
+    Serial.print("V3 = ");
+    Serial.println(V3, 4);
+}
+
+
+// =============================================
+// GERAK HOLONOMIC DIAGONAL
+// Komponen X dan Y aktif bersamaan, tanpa rotasi.
+// Masing-masing komponen = 0.5 / sqrt(2) = 0.3536
+// agar besar kecepatan translasi nominal tetap 0.5.
+// =============================================
+
+// R = MAJU + X POSITIF
+else if (command == 'r' || command == 'R')
+{
+    linear_x = 0.3536;
+    linear_y = 0.3536;
+    angular_z = 0.0;
+
+    startHeadingHold();
+    resetAllPID();
+    inverseKinematics();
+    calculateTarget();
+    robotMoving = true;
+
+    Serial.println();
+    Serial.println(">>> DIAGONAL: MAJU + X POSITIF");
+    Serial.print("V1 = "); Serial.println(V1, 4);
+    Serial.print("V2 = "); Serial.println(V2, 4);
+    Serial.print("V3 = "); Serial.println(V3, 4);
+}
+
+// T = MAJU + X NEGATIF
+else if (command == 't' || command == 'T')
+{
+    linear_x = -0.3536;
+    linear_y = 0.3536;
+    angular_z = 0.0;
+
+    startHeadingHold();
+    resetAllPID();
+    inverseKinematics();
+    calculateTarget();
+    robotMoving = true;
+
+    Serial.println();
+    Serial.println(">>> DIAGONAL: MAJU + X NEGATIF");
+    Serial.print("V1 = "); Serial.println(V1, 4);
+    Serial.print("V2 = "); Serial.println(V2, 4);
+    Serial.print("V3 = "); Serial.println(V3, 4);
+}
+
+// F = MUNDUR + X POSITIF
+else if (command == 'f' || command == 'F')
+{
+    linear_x = 0.3536;
+    linear_y = -0.3536;
+    angular_z = 0.0;
+
+    startHeadingHold();
+    resetAllPID();
+    inverseKinematics();
+    calculateTarget();
+    robotMoving = true;
+
+    Serial.println();
+    Serial.println(">>> DIAGONAL: MUNDUR + X POSITIF");
+    Serial.print("V1 = "); Serial.println(V1, 4);
+    Serial.print("V2 = "); Serial.println(V2, 4);
+    Serial.print("V3 = "); Serial.println(V3, 4);
+}
+
+// G = MUNDUR + X NEGATIF
+else if (command == 'g' || command == 'G')
+{
+    linear_x = -0.3536;
+    linear_y = -0.3536;
+    angular_z = 0.0;
+
+    startHeadingHold();
+    resetAllPID();
+    inverseKinematics();
+    calculateTarget();
+    robotMoving = true;
+
+    Serial.println();
+    Serial.println(">>> DIAGONAL: MUNDUR + X NEGATIF");
+    Serial.print("V1 = "); Serial.println(V1, 4);
+    Serial.print("V2 = "); Serial.println(V2, 4);
+    Serial.print("V3 = "); Serial.println(V3, 4);
+}
+
+
+
 
 
         // =============================================
         // PUTAR KIRI
         // =============================================
-        //
-        // CCW / angular_z positif
-        // =============================================
 
-        else if (command == 'a' ||
-                 command == 'A')
+        else if (command == 'a' || command == 'A')
         {
             linear_x = 0.0;
             linear_y = 0.0;
             angular_z = 0.5;
-
+            disableHeadingHold();
 
             resetAllPID();
-
 
             inverseKinematics();
             calculateTarget();
 
-
             robotMoving = true;
-
 
             Serial.println();
             Serial.println(">>> PUTAR KIRI");
+
+            Serial.print("V1 = ");
+            Serial.println(V1, 4);
+
+            Serial.print("V2 = ");
+            Serial.println(V2, 4);
+
+            Serial.print("V3 = ");
+            Serial.println(V3, 4);
         }
 
 
         // =============================================
         // PUTAR KANAN
         // =============================================
-        //
-        // CW / angular_z negatif
-        // =============================================
 
-        else if (command == 'd' ||
-                 command == 'D')
+        else if (command == 'd' || command == 'D')
         {
             linear_x = 0.0;
             linear_y = 0.0;
             angular_z = -0.5;
-
+            disableHeadingHold();
 
             resetAllPID();
-
 
             inverseKinematics();
             calculateTarget();
 
-
             robotMoving = true;
-
 
             Serial.println();
             Serial.println(">>> PUTAR KANAN");
+
+            Serial.print("V1 = ");
+            Serial.println(V1, 4);
+
+            Serial.print("V2 = ");
+            Serial.println(V2, 4);
+
+            Serial.print("V3 = ");
+            Serial.println(V3, 4);
         }
 
 
@@ -980,8 +1465,7 @@ void loop()
         // STOP
         // =============================================
 
-        else if (command == 'x' ||
-                 command == 'X')
+        else if (command == 'x' || command == 'X')
         {
             stopRobot();
 
@@ -990,4 +1474,3 @@ void loop()
         }
     }
 }
-```
