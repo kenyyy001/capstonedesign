@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""
-ArUco Lock Node - Human Leg Tracking via Marker (dengan visual streaming)
-===========================================================================
-Mengunci target manusia menggunakan marker ArUco yang ditempel di kaki/
-pergelangan kaki pasien. Tambahan: visual kamera bisa dilihat dari browser
-via Flask streaming (karena node ini headless, tidak ada cv2.imshow()).
-
-Publish ROS2:
-- /vision/target_locked   (std_msgs/Bool)
-- /vision/target_position (geometry_msgs/Point)  x=offset, y=jarak(meter)
-
-Visual:
-- Buka http://<IP_ORANGEPI>:5000 dari browser laptop untuk lihat kamera.
-"""
-
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
