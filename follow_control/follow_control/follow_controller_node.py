@@ -1,40 +1,4 @@
 #!/usr/bin/env python3
-"""
-Follow Controller Node (v2 - histeresis + kontrol jarak 3 zona)
-=================================================================
-Mengubah data dari vision (arah + jarak marker) menjadi perintah gerak robot.
-
-Subscribe:
-  /vision/target_locked   (std_msgs/Bool)
-  /vision/target_position (geometry_msgs/Point)
-        x = offset horizontal -1.0 (kiri) .. 1.0 (kanan)
-        y = estimasi jarak ke marker (meter)
-
-Publish:
-  /cmd_vel (geometry_msgs/Twist) -> nilai DINORMALISASI -1.0 .. 1.0
-
------------------------------------------------------------------
-PERUBAHAN v2:
-1. YAW pakai HISTERESIS + FILTER SMOOTHING (EMA) untuk mengurangi
-   robot "bingung" bolak-balik mencari tengah. Dulu satu ambang batas
-   tunggal menyebabkan robot langsung membalas arah begitu marker
-   lewat sedikit ke sisi lain -> osilasi. Sekarang:
-     - offset melewati filter EMA dulu (meredam noise antar frame)
-     - robot BARU MULAI berputar kalau offset melewati
-       'offset_enter' (ambang masuk, lebih lebar)
-     - robot BERHENTI berputar kalau offset sudah di bawah
-       'offset_exit' (ambang keluar, lebih sempit)
-     Dua ambang berbeda ini (histeresis) mencegah robot langsung
-     putar arah berlawanan karena noise kecil di sekitar titik tengah.
-
-2. JARAK pakai 3 ZONA (bukan proporsional lagi):
-     - jarak > 0.3 m   -> MAJU
-     - 0.2 m - 0.3 m   -> BERHENTI (hanya kalau sebelumnya tidak mundur)
-     - jarak < 0.2 m   -> MUNDUR, TERUS mundur sampai jarak balik ke
-                          >= 0.3 m (tidak berhenti di tengah 0.2-0.3 m)
------------------------------------------------------------------
-"""
-
 import math
 
 import rclpy
