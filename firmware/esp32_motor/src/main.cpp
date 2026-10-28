@@ -911,7 +911,7 @@ void printTarget()
 void setup()
 {
     Serial.begin(115200);
-    Serial.Timeout(20);
+    Serial.setTimeout(20);
 
     // GPIO34–GPIO39 tidak memiliki pull-up internal.
     // Pastikan rangkaian encoder menyediakan level
@@ -1219,11 +1219,6 @@ else if (command == 'g' || command == 'G')
     Serial.print("V2 = "); Serial.println(V2, 4);
     Serial.print("V3 = "); Serial.println(V3, 4);
 }
-
-
-
-
-
         // =============================================
         // PUTAR KIRI
         // =============================================
@@ -1312,7 +1307,7 @@ else if (command == 'g' || command == 'G')
 
                 linear_x  = vx;
                 linear_y  = vy;
-                angular_z = w;
+                angular_z = w   ;
                 speedScale = constrain(s, 0.0f, 1.0f);
 
                 inverseKinematics();
