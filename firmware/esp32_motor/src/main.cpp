@@ -751,10 +751,10 @@ void driveRobot(float dt)
         motor1(dir1 * pwm1);
 
     if (targetM2 > 0.01f)
-        motor2(dir2 * pwm2);
+        motor2(-dir2 * pwm2);
 
     if (targetM3 > 0.01f)
-        motor3(-dir3 * pwm3);
+        motor3(dir3 * pwm3);
 
 
     // -------------------------------------------------
