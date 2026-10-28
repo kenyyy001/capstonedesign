@@ -1,5 +1,19 @@
 #include <Arduino.h>
 #include <math.h>
+#include <Wire.h>
+#include <Adafruit_BNO055.h>
+#include <Adafruit_Sensor.h>
+
+// =====================================================
+// BNO055 / I2C CONFIGURATION
+// ESP32 default pins used here: SDA=GPIO21, SCL=GPIO22
+// If the sensor is not detected, try address 0x29.
+// =====================================================
+#define BNO055_SDA_PIN 21
+#define BNO055_SCL_PIN 22
+#define BNO055_I2C_ADDR 0x28
+
+Adafruit_BNO055 bno(55, BNO055_I2C_ADDR, &Wire);
 
 // =====================================================
 // 1. PIN MOTOR ESP32
@@ -102,6 +116,76 @@ double angular_z = 0.0;
 
 
 // =====================================================
+// 6A. BNO055 HEADING HOLD
+// =====================================================
+// angular_z tetap menjadi perintah rotasi manual.
+// headingCorrection ditambahkan ke omega inverse kinematics
+// hanya saat robot melakukan translasi dan heading hold aktif.
+
+bool bnoAvailable = false;
+bool headingHoldEnabled = false;
+float currentYawDeg = 0.0f;
+float targetYawDeg = 0.0f;
+float headingErrorDeg = 0.0f;
+float headingCorrection = 0.0f;
+
+// Nilai awal konservatif; lakukan tuning setelah uji fisik.
+const float HEADING_KP = 0.03f;                // koreksi omega per derajat
+const float HEADING_MAX_CORRECTION = 1.0f;     // batas koreksi omega
+const float HEADING_DEADBAND_DEG = 1.5f;       // toleransi heading
+// BNO055 heading bertambah searah jarum jam, sedangkan angular_z positif
+// pada program ini digunakan untuk putar kiri. Karena itu tanda koreksi dibalik.
+const float HEADING_CORRECTION_SIGN = -1.0f;
+
+
+// =====================================================
+// 6B. ODOMETRI RODA + KOREKSI LINTASAN LATERAL
+// =====================================================
+// BNO055 menyediakan sudut yaw, bukan posisi X/Y. Posisi relatif
+// diestimasi dari encoder roda dan dikoreksi dengan perubahan yaw IMU.
+// Koreksi cross-track menambahkan gerak kecil tegak lurus lintasan
+// untuk mengurangi penyimpangan dari garis lintasan yang dimulai saat
+// tombol gerak ditekan.
+//
+// PENTING: koreksi dinonaktifkan dulu sampai arah tanda encoder
+// diverifikasi. Setiap tanda harus membuat hitungan encoder positif
+// searah dengan V1/V2/V3 positif pada model inverse kinematics.
+// =====================================================
+const bool ENABLE_CROSS_TRACK_CORRECTION = false; // ubah true setelah kalibrasi tanda encoder
+
+const float ENCODER_TO_WHEEL_SIGN_M1 = +1.0f;
+const float ENCODER_TO_WHEEL_SIGN_M2 = +1.0f;
+const float ENCODER_TO_WHEEL_SIGN_M3 = +1.0f;
+
+// Koefisien rotasi 0.0317 pada matriks diasumsikan dalam meter,
+// sehingga menjadi 3.17 cm untuk odometri berbasis jarak roda.
+// Sesuaikan dengan definisi/unit matriks kinematika yang sebenarnya.
+const float ODOM_ROTATION_COEFF_CM = 3.17f;
+
+// Penguatan keluaran lateral (dalam skala perintah linear_x/linear_y
+// per cm error lintasan), batas koreksi, dan deadband posisi.
+const float CROSS_TRACK_KP = 0.025f;
+const float CROSS_TRACK_MAX_COMMAND = 0.18f;
+const float CROSS_TRACK_DEADBAND_CM = 1.0f;
+
+float odomXcm = 0.0f;
+float odomYcm = 0.0f;
+float lastOdomYawDeg = 0.0f;
+bool odomYawInitialized = false;
+
+bool crossTrackEnabled = false;
+float trackStartXcm = 0.0f;
+float trackStartYcm = 0.0f;
+float trackDirWorldX = 0.0f;
+float trackDirWorldY = 1.0f;
+float trackCommandX = 0.0f;
+float trackCommandY = 0.0f;
+float crossTrackErrorCm = 0.0f;
+float crossTrackCorrectionBodyX = 0.0f;
+float crossTrackCorrectionBodyY = 0.0f;
+
+
+// =====================================================
 // 7. HASIL INVERSE KINEMATICS
 // =====================================================
 
@@ -170,6 +254,11 @@ const bool ENABLE_ENCODER_PID = true;
 volatile long encoder_count1 = 0;
 volatile long encoder_count2 = 0;
 volatile long encoder_count3 = 0;
+
+// Akumulasi delta bertanda untuk diagnostik selama interval Serial Monitor.
+long monitorPulseM1 = 0;
+long monitorPulseM2 = 0;
+long monitorPulseM3 = 0;
 
 
 // =====================================================
@@ -313,6 +402,249 @@ int signOf(double value)
 
 
 // =====================================================
+// 18A. FUNGSI BNO055 DAN KOREKSI HEADING
+// =====================================================
+
+float wrapAngle180(float angleDeg)
+{
+    while (angleDeg > 180.0f) angleDeg -= 360.0f;
+    while (angleDeg < -180.0f) angleDeg += 360.0f;
+    return angleDeg;
+}
+
+bool readBNOYaw()
+{
+    if (!bnoAvailable)
+        return false;
+
+    // VECTOR_EULER.x() adalah heading/yaw dalam derajat.
+    imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+    float heading = euler.x();
+
+    if (!isfinite((double)heading))
+        return false;
+
+    while (heading >= 360.0f) heading -= 360.0f;
+    while (heading < 0.0f) heading += 360.0f;
+
+    currentYawDeg = heading;
+    return true;
+}
+
+void setupBNO055()
+{
+    Wire.begin(BNO055_SDA_PIN, BNO055_SCL_PIN);
+    Wire.setClock(100000);  // I2C 100 kHz untuk pengujian awal
+    // BNO055 memerlukan waktu startup sebelum komunikasi I2C siap.
+    delay(700);
+
+    Serial.println();
+    Serial.println("Inisialisasi BNO055...");
+
+    if (!bno.begin())
+    {
+        bnoAvailable = false;
+        headingHoldEnabled = false;
+        headingCorrection = 0.0f;
+        Serial.println("PERINGATAN: BNO055 tidak terdeteksi pada alamat 0x28.");
+        Serial.println("Periksa kabel SDA/SCL/VCC/GND atau coba alamat 0x29.");
+        Serial.println("Robot tetap bisa bergerak tanpa koreksi heading IMU.");
+        return;
+    }
+
+    bnoAvailable = true;
+    bno.setExtCrystalUse(true);
+    delay(100);
+    readBNOYaw();
+
+    Serial.println("BNO055 terdeteksi.");
+    lastOdomYawDeg = currentYawDeg;
+    odomYawInitialized = true;
+    Serial.print("Heading awal = ");
+    Serial.print(currentYawDeg, 2);
+    Serial.println(" deg");
+}
+
+void startHeadingHold()
+{
+    headingCorrection = 0.0f;
+    headingErrorDeg = 0.0f;
+
+    // Jika perintah translasi dikirim berulang dari komputer/Orange Pi,
+    // jangan menggeser target yaw pada setiap pesan. Target hanya diambil
+    // ketika heading hold baru diaktifkan (setelah STOP atau putar manual).
+    if (headingHoldEnabled && bnoAvailable)
+    {
+        readBNOYaw();
+        return;
+    }
+
+    if (readBNOYaw())
+    {
+        targetYawDeg = currentYawDeg;
+        headingHoldEnabled = true;
+        Serial.print("Heading hold aktif. Target yaw = ");
+        Serial.print(targetYawDeg, 2);
+        Serial.println(" deg");
+    }
+    else
+    {
+        headingHoldEnabled = false;
+        Serial.println("Heading hold tidak aktif: BNO055 belum tersedia.");
+    }
+}
+
+void disableHeadingHold()
+{
+    headingHoldEnabled = false;
+    headingCorrection = 0.0f;
+    headingErrorDeg = 0.0f;
+}
+
+void disableCrossTrackHold()
+{
+    crossTrackEnabled = false;
+    crossTrackErrorCm = 0.0f;
+    crossTrackCorrectionBodyX = 0.0f;
+    crossTrackCorrectionBodyY = 0.0f;
+}
+
+void startCrossTrackHold()
+{
+    crossTrackCorrectionBodyX = 0.0f;
+    crossTrackCorrectionBodyY = 0.0f;
+    crossTrackErrorCm = 0.0f;
+
+    if (!bnoAvailable || (fabs(linear_x) + fabs(linear_y) < 0.001))
+    {
+        disableCrossTrackHold();
+        Serial.println("Cross-track hold tidak aktif: perlu BNO055 dan perintah translasi.");
+        return;
+    }
+
+    // Jika perintah arah sama diulang, pertahankan garis referensi yang lama.
+    if (crossTrackEnabled &&
+        fabsf((float)linear_x - trackCommandX) < 0.01f &&
+        fabsf((float)linear_y - trackCommandY) < 0.01f)
+    {
+        return;
+    }
+
+    const float norm = sqrtf((float)(linear_x * linear_x + linear_y * linear_y));
+    if (norm < 0.001f)
+    {
+        disableCrossTrackHold();
+        return;
+    }
+
+    const float yawRad = currentYawDeg * DEG_TO_RAD;
+    const float bx = (float)linear_x / norm;
+    const float by = (float)linear_y / norm;
+
+    // Body frame: +X lateral, +Y maju. BNO055 heading bertambah searah jarum jam.
+    trackDirWorldX = bx * cosf(yawRad) + by * sinf(yawRad);
+    trackDirWorldY = -bx * sinf(yawRad) + by * cosf(yawRad);
+
+    trackStartXcm = odomXcm;
+    trackStartYcm = odomYcm;
+    trackCommandX = (float)linear_x;
+    trackCommandY = (float)linear_y;
+    crossTrackEnabled = true;
+
+    Serial.print("Cross-track hold mulai. Posisi awal X/Y = ");
+    Serial.print(trackStartXcm, 2);
+    Serial.print(" / ");
+    Serial.print(trackStartYcm, 2);
+    Serial.println(" cm");
+}
+
+void updateCrossTrackController()
+{
+    crossTrackCorrectionBodyX = 0.0f;
+    crossTrackCorrectionBodyY = 0.0f;
+
+    if (!crossTrackEnabled || !bnoAvailable || !robotMoving ||
+        (fabs(linear_x) + fabs(linear_y) < 0.001))
+    {
+        crossTrackErrorCm = 0.0f;
+        return;
+    }
+
+    // Normal vektor garis referensi. Error positif berarti posisi estimasi
+    // berada di sisi +normal; koreksi diarahkan ke -normal.
+    const float normalX = -trackDirWorldY;
+    const float normalY = trackDirWorldX;
+    const float dxWorld = odomXcm - trackStartXcm;
+    const float dyWorld = odomYcm - trackStartYcm;
+
+    crossTrackErrorCm = dxWorld * normalX + dyWorld * normalY;
+
+    // Tetap hitung dan tampilkan error estimasi walau koreksi belum diaktifkan.
+    if (!ENABLE_CROSS_TRACK_CORRECTION ||
+        fabsf(crossTrackErrorCm) <= CROSS_TRACK_DEADBAND_CM)
+        return;
+
+    float correctionMagnitude = -CROSS_TRACK_KP * crossTrackErrorCm;
+    correctionMagnitude = constrain(
+        correctionMagnitude,
+        -CROSS_TRACK_MAX_COMMAND,
+        CROSS_TRACK_MAX_COMMAND
+    );
+
+    const float correctionWorldX = correctionMagnitude * normalX;
+    const float correctionWorldY = correctionMagnitude * normalY;
+    const float yawRad = currentYawDeg * DEG_TO_RAD;
+
+    // Transformasi vektor koreksi dari frame global kembali ke frame robot.
+    crossTrackCorrectionBodyX =
+        correctionWorldX * cosf(yawRad) - correctionWorldY * sinf(yawRad);
+    crossTrackCorrectionBodyY =
+        correctionWorldX * sinf(yawRad) + correctionWorldY * cosf(yawRad);
+}
+
+void updateHeadingController()
+{
+    if (!bnoAvailable)
+    {
+        headingCorrection = 0.0f;
+        headingErrorDeg = 0.0f;
+        return;
+    }
+
+    // Tetap perbarui pembacaan yaw pada saat putar manual untuk diagnosis Serial.
+    if (!readBNOYaw())
+    {
+        headingCorrection = 0.0f;
+        return;
+    }
+
+    if (!headingHoldEnabled)
+    {
+        headingCorrection = 0.0f;
+        headingErrorDeg = 0.0f;
+        return;
+    }
+
+    // Error terbungkus ke -180..+180 agar tidak salah arah melintasi 0/360 deg.
+    headingErrorDeg = wrapAngle180(targetYawDeg - currentYawDeg);
+
+    if (fabsf(headingErrorDeg) <= HEADING_DEADBAND_DEG)
+    {
+        headingCorrection = 0.0f;
+    }
+    else
+    {
+        headingCorrection = HEADING_CORRECTION_SIGN * HEADING_KP * headingErrorDeg;
+        headingCorrection = constrain(
+            headingCorrection,
+            -HEADING_MAX_CORRECTION,
+            HEADING_MAX_CORRECTION
+        );
+    }
+}
+
+
+// =====================================================
 // 19. KENDALI PWM MOTOR
 // =====================================================
 //
@@ -399,6 +731,8 @@ void stopRobot()
     linear_x = 0.0;
     linear_y = 0.0;
     angular_z = 0.0;
+    disableHeadingHold();
+    disableCrossTrackHold();
 
     V1 = 0.0;
     V2 = 0.0;
@@ -420,20 +754,27 @@ void stopRobot()
 
 void inverseKinematics()
 {
+    // Heading correction mengurangi rotasi tak diinginkan.
+    // Cross-track correction menambahkan komponen translasi tegak lurus
+    // lintasan untuk memperbaiki error posisi lateral yang TERESTIMASI.
+    const double effectiveOmega = angular_z + headingCorrection;
+    const double effectiveLinearX = linear_x + crossTrackCorrectionBodyX;
+    const double effectiveLinearY = linear_y + crossTrackCorrectionBodyY;
+
     V3 =
-        matrix_kecepatan[0] * linear_x
-      + matrix_kecepatan[1] * linear_y
-      + matrix_kecepatan[2] * angular_z;
+        matrix_kecepatan[0] * effectiveLinearX
+      + matrix_kecepatan[1] * effectiveLinearY
+      + matrix_kecepatan[2] * effectiveOmega;
 
     V2 =
-        matrix_kecepatan[3] * linear_x
-      + matrix_kecepatan[4] * linear_y
-      + matrix_kecepatan[5] * angular_z;
+        matrix_kecepatan[3] * effectiveLinearX
+      + matrix_kecepatan[4] * effectiveLinearY
+      + matrix_kecepatan[5] * effectiveOmega;
 
     V1 =
-        matrix_kecepatan[6] * linear_x
-      + matrix_kecepatan[7] * linear_y
-      + matrix_kecepatan[8] * angular_z;
+        matrix_kecepatan[6] * effectiveLinearX
+      + matrix_kecepatan[7] * effectiveLinearY
+      + matrix_kecepatan[8] * effectiveOmega;
 }
 
 
@@ -495,25 +836,57 @@ void updateEncoderSpeed(float dt)
     long c3;
 
     noInterrupts();
-
     c1 = encoder_count1;
     c2 = encoder_count2;
     c3 = encoder_count3;
-
     encoder_count1 = 0;
     encoder_count2 = 0;
     encoder_count3 = 0;
-
     interrupts();
 
-    speedM1 =
-        fabsf((float)c1) * CM_PER_PULSE / dt;
+    monitorPulseM1 += c1;
+    monitorPulseM2 += c2;
+    monitorPulseM3 += c3;
 
-    speedM2 =
-        fabsf((float)c2) * CM_PER_PULSE / dt;
+    // PID kecepatan lama tetap memakai besar kecepatan absolut.
+    speedM1 = fabsf((float)c1) * CM_PER_PULSE / dt;
+    speedM2 = fabsf((float)c2) * CM_PER_PULSE / dt;
+    speedM3 = fabsf((float)c3) * CM_PER_PULSE / dt;
 
-    speedM3 =
-        fabsf((float)c3) * CM_PER_PULSE / dt;
+    // Odometria membutuhkan hitungan encoder bertanda. Tanda encoder
+    // harus dikalibrasi agar ds_i positif searah V_i positif pada matriks.
+    if (!bnoAvailable)
+        return;
+
+    if (!odomYawInitialized)
+    {
+        lastOdomYawDeg = currentYawDeg;
+        odomYawInitialized = true;
+        return;
+    }
+
+    const float oldYawDeg = lastOdomYawDeg;
+    const float deltaYawCWdeg = wrapAngle180(currentYawDeg - oldYawDeg);
+    const float deltaThetaCCW = -deltaYawCWdeg * DEG_TO_RAD;
+    const float midYawRad = (oldYawDeg + 0.5f * deltaYawCWdeg) * DEG_TO_RAD;
+    lastOdomYawDeg = currentYawDeg;
+
+    const float ds1 = (float)c1 * CM_PER_PULSE * ENCODER_TO_WHEEL_SIGN_M1;
+    const float ds2 = (float)c2 * CM_PER_PULSE * ENCODER_TO_WHEEL_SIGN_M2;
+    const float ds3 = (float)c3 * CM_PER_PULSE * ENCODER_TO_WHEEL_SIGN_M3;
+
+    // Invers pendekatan matriks roda, dalam cm. 0.0317 m diasumsikan 3.17 cm.
+    // dX = 0.75*(ds1 - ds2 - ds3 + k*dtheta)
+    // dY = (ds3 - ds2)/(2*0.5774)
+    const float dxBodyCm = 0.75f * (
+        ds1 - ds2 - ds3 + ODOM_ROTATION_COEFF_CM * deltaThetaCCW
+    );
+    const float dyBodyCm = (ds3 - ds2) / 1.1548f;
+
+    // Integrasikan pose pada frame global relatif terhadap pose awal.
+    // BNO yaw bertambah searah jarum jam; sumbu body +Y adalah arah maju.
+    odomXcm += dxBodyCm * cosf(midYawRad) + dyBodyCm * sinf(midYawRad);
+    odomYcm += -dxBodyCm * sinf(midYawRad) + dyBodyCm * cosf(midYawRad);
 }
 
 
@@ -768,8 +1141,49 @@ void driveRobot(float dt)
         Serial.print("linear_y = ");
         Serial.println(linear_y, 3);
 
-        Serial.print("angular_z = ");
+        Serial.print("angular_z command = ");
         Serial.println(angular_z, 3);
+
+        Serial.print("BNO055 = ");
+        Serial.println(bnoAvailable ? "TERDETEKSI" : "TIDAK TERDETEKSI");
+        if (bnoAvailable)
+        {
+            Serial.print("Yaw sekarang = ");
+            Serial.print(currentYawDeg, 2);
+            Serial.println(" deg");
+            Serial.print("Yaw target = ");
+            Serial.print(targetYawDeg, 2);
+            Serial.println(" deg");
+            Serial.print("Error heading = ");
+            Serial.print(headingErrorDeg, 2);
+            Serial.println(" deg");
+            Serial.print("Koreksi heading = ");
+            Serial.println(headingCorrection, 3);
+            Serial.print("Heading hold = ");
+            Serial.println(headingHoldEnabled ? "AKTIF" : "NONAKTIF");
+            Serial.print("Odometria X/Y = ");
+            Serial.print(odomXcm, 2);
+            Serial.print(" / ");
+            Serial.print(odomYcm, 2);
+            Serial.println(" cm");
+            Serial.print("Cross-track error estimasi = ");
+            Serial.print(crossTrackErrorCm, 2);
+            Serial.println(" cm");
+            Serial.print("Koreksi posisi body X/Y = ");
+            Serial.print(crossTrackCorrectionBodyX, 3);
+            Serial.print(" / ");
+            Serial.println(crossTrackCorrectionBodyY, 3);
+            Serial.print("Cross-track controller = ");
+            Serial.println(ENABLE_CROSS_TRACK_CORRECTION ? "DIIZINKAN" : "NONAKTIF (kalibrasi encoder dulu)");
+
+            uint8_t calSys = 0, calGyro = 0, calAccel = 0, calMag = 0;
+            bno.getCalibration(&calSys, &calGyro, &calAccel, &calMag);
+            Serial.print("Kalibrasi Sys/Gyro/Accel/Mag = ");
+            Serial.print(calSys); Serial.print("/");
+            Serial.print(calGyro); Serial.print("/");
+            Serial.print(calAccel); Serial.print("/");
+            Serial.println(calMag);
+        }
 
         Serial.println();
 
@@ -809,6 +1223,15 @@ void driveRobot(float dt)
         Serial.print("Speed M3 = ");
         Serial.print(speedM3, 2);
         Serial.println(" cm/s");
+
+        Serial.println();
+        Serial.print("Pulse signed M1/M2/M3 (500 ms) = ");
+        Serial.print(monitorPulseM1); Serial.print(" / ");
+        Serial.print(monitorPulseM2); Serial.print(" / ");
+        Serial.println(monitorPulseM3);
+        monitorPulseM1 = 0;
+        monitorPulseM2 = 0;
+        monitorPulseM3 = 0;
 
         Serial.println();
 
@@ -866,6 +1289,9 @@ void setupMotor()
 void setup()
 {
     Serial.begin(115200);
+    delay(300);
+
+    setupBNO055();
 
     // GPIO34–GPIO39 tidak memiliki pull-up internal.
     // Pastikan rangkaian encoder menyediakan level
@@ -902,7 +1328,8 @@ void setup()
 
 Serial.println("======================================");
 Serial.println(" OMNI ROBOT 3 RODA");
-Serial.println(" HOLONOMIC + INVERSE KINEMATICS + PID");
+Serial.println(" HOLONOMIC + ENCODER ODOMETRY + BNO055");
+Serial.println(" HEADING HOLD + CROSS-TRACK CORRECTION");
 Serial.println("======================================");
 Serial.println("W = MAJU (+Y)");
 Serial.println("S = MUNDUR (-Y)");
@@ -921,6 +1348,8 @@ Serial.println("======================================");
     Serial.println(
         ENABLE_ENCODER_PID ? "AKTIF" : "NONAKTIF"
     );
+    Serial.print("Cross-track correction: ");
+    Serial.println(ENABLE_CROSS_TRACK_CORRECTION ? "AKTIF" : "NONAKTIF - kalibrasi tanda encoder dahulu");
 }
 
 
@@ -942,10 +1371,18 @@ void loop()
 
         lastPIDTime = now;
 
+        if (robotMoving)
+            updateHeadingController();
+        else if (bnoAvailable)
+            readBNOYaw();
+
         updateEncoderSpeed(dt);
 
         if (robotMoving)
         {
+            updateCrossTrackController();
+            inverseKinematics();
+            calculateTarget();
             driveRobot(dt);
         }
     }
@@ -974,6 +1411,8 @@ void loop()
             linear_y = 0.5;
             angular_z = 0.0;
 
+            startHeadingHold();
+            startCrossTrackHold();
             resetAllPID();
 
             inverseKinematics();
@@ -1005,6 +1444,8 @@ void loop()
             linear_y = -0.5;
             angular_z = 0.0;
 
+            startHeadingHold();
+            startCrossTrackHold();
             resetAllPID();
 
             inverseKinematics();
@@ -1035,6 +1476,8 @@ else if (command == 'q' || command == 'Q')
     linear_y = 0.0;
     angular_z = 0.0;
 
+    startHeadingHold();
+    startCrossTrackHold();
     resetAllPID();
 
     inverseKinematics();
@@ -1066,6 +1509,8 @@ else if (command == 'e' || command == 'E')
     linear_y = 0.0;
     angular_z = 0.0;
 
+    startHeadingHold();
+    startCrossTrackHold();
     resetAllPID();
 
     inverseKinematics();
@@ -1101,6 +1546,8 @@ else if (command == 'r' || command == 'R')
     linear_y = 0.3536;
     angular_z = 0.0;
 
+    startHeadingHold();
+    startCrossTrackHold();
     resetAllPID();
     inverseKinematics();
     calculateTarget();
@@ -1120,6 +1567,8 @@ else if (command == 't' || command == 'T')
     linear_y = 0.3536;
     angular_z = 0.0;
 
+    startHeadingHold();
+    startCrossTrackHold();
     resetAllPID();
     inverseKinematics();
     calculateTarget();
@@ -1139,6 +1588,8 @@ else if (command == 'f' || command == 'F')
     linear_y = -0.3536;
     angular_z = 0.0;
 
+    startHeadingHold();
+    startCrossTrackHold();
     resetAllPID();
     inverseKinematics();
     calculateTarget();
@@ -1158,6 +1609,8 @@ else if (command == 'g' || command == 'G')
     linear_y = -0.3536;
     angular_z = 0.0;
 
+    startHeadingHold();
+    startCrossTrackHold();
     resetAllPID();
     inverseKinematics();
     calculateTarget();
@@ -1183,6 +1636,8 @@ else if (command == 'g' || command == 'G')
             linear_x = 0.0;
             linear_y = 0.0;
             angular_z = 0.5;
+            disableHeadingHold();
+            disableCrossTrackHold();
 
             resetAllPID();
 
@@ -1214,6 +1669,8 @@ else if (command == 'g' || command == 'G')
             linear_x = 0.0;
             linear_y = 0.0;
             angular_z = -0.5;
+            disableHeadingHold();
+            disableCrossTrackHold();
 
             resetAllPID();
 
