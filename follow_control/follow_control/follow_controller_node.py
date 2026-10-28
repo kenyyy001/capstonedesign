@@ -1,25 +1,4 @@
 #!/usr/bin/env python3
-"""
-Follow Controller Node
-======================
-Mengubah data dari vision (arah + jarak marker) menjadi perintah gerak robot.
-
-Subscribe:
-  /vision/target_locked   (std_msgs/Bool)
-  /vision/target_position (geometry_msgs/Point)
-        x = offset horizontal -1.0 (kiri) .. 1.0 (kanan)
-        y = estimasi jarak ke marker (meter)
-
-Publish:
-  /cmd_vel (geometry_msgs/Twist) -> nilai DINORMALISASI -1.0 .. 1.0
-        linear.x  = maju (+) / mundur (-)
-        angular.z = putar kiri (+) / putar kanan (-)
-  (linear.y tidak dipakai, robot berputar untuk menjaga target tetap di tengah)
-
-Keselamatan: kalau target tidak terkunci, atau data vision berhenti datang
-lebih dari lost_timeout_s, node otomatis mem-publish perintah NOL (robot berhenti).
-"""
-
 import math
 
 import rclpy
