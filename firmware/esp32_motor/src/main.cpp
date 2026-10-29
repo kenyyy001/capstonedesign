@@ -1395,7 +1395,7 @@ else if (command == 'g' || command == 'G')
                     resetAllPID();
 
                 linear_x  = vx;
-                linear_y  = vy;
+                linear_y  = -vy;
                 angular_z = w;
                 speedScale = constrain(s, 0.0f, 1.0f);
 
