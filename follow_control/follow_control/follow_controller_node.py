@@ -54,9 +54,7 @@ class FollowControllerNode(Node):
         self.filtered_offset = 0.0     # hasil smoothing EMA
         self.is_turning = False        # state histeresis yaw
 
-        self.distance_state = 'STOP'   # state mesin jarak: 'FORWARD' | 'STOP' | 'BACKWARD'
-
-        # ---------------- Topic ----------------
+        self.distance_state = 'STOP'   
         self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, 10)
         self.create_subscription(Point, '/vision/target_position', self.position_callback, 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -67,7 +65,6 @@ class FollowControllerNode(Node):
             f'Follow controller v2 siap. Zona jarak: maju>{self.far_threshold}m, '
             f'mundur<{self.near_threshold}m')
 
-    # ------------------------------------------------------------------
     def locked_callback(self, msg):
         self.target_locked = msg.data
 
@@ -81,16 +78,13 @@ class FollowControllerNode(Node):
         age = (self.get_clock().now() - self.last_position_time).nanoseconds * 1e-9
         return age < self.lost_timeout
 
-    # ------------------------------------------------------------------
     def compute_yaw(self, offset_raw):
         """Histeresis + EMA smoothing supaya robot tidak bolak-balik mencari tengah."""
-        # --- Filter smoothing: redam noise antar frame ---
         a = self.smoothing_alpha
         self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
 
         magnitude = abs(self.filtered_offset)
 
-        # --- Histeresis: ambang MASUK dan KELUAR berbeda ---
         if self.is_turning:
             if magnitude < self.offset_exit:
                 self.is_turning = False
@@ -101,13 +95,8 @@ class FollowControllerNode(Node):
         if not self.is_turning:
             return 0.0
 
-        # marker di kanan (offset > 0) -> putar kanan = angular.z NEGATIF
         value = -self.kp_yaw * self.filtered_offset
         value = max(-self.max_yaw, min(self.max_yaw, value))
-
-        # jaga di atas PWM minimum supaya motor tidak stall
-        if abs(value) < self.min_yaw_command:
-            value = math.copysign(self.min_yaw_command, value)
 
         return value
 
@@ -118,9 +107,6 @@ class FollowControllerNode(Node):
         elif distance < self.near_threshold:
             self.distance_state = 'BACKWARD'
         else:
-            # di antara near dan far threshold:
-            # - kalau sedang MUNDUR, TERUS mundur sampai jarak >= far_threshold
-            # - kalau sedang MAJU atau STOP, berhenti di zona ini
             if self.distance_state != 'BACKWARD':
                 self.distance_state = 'STOP'
 
@@ -130,9 +116,8 @@ class FollowControllerNode(Node):
             return -self.backward_speed
         return 0.0
 
-    # ------------------------------------------------------------------
     def control_loop(self):
-        cmd = Twist()  # default: semua nol = STOP
+        cmd = Twist()  
         state = 'HILANG'
 
         if self.target_locked and self.position is not None and self.position_is_fresh():
@@ -143,7 +128,6 @@ class FollowControllerNode(Node):
                 cmd.angular.z = self.compute_yaw(offset)
                 state = f'MENGIKUTI (jarak_state={self.distance_state}, turning={self.is_turning})'
         else:
-            # target hilang -> reset state supaya tidak "nyangkut" di MUNDUR/berputar saat ketemu lagi
             self.distance_state = 'STOP'
             self.is_turning = False
             self.filtered_offset = 0.0
