@@ -1,2 +1,2 @@
 # capstonedesign
-program e arekarek
+BNO055 + keyboard tahap awal
