@@ -12,7 +12,6 @@ class FollowControllerNode(Node):
     def __init__(self):
         super().__init__('follow_controller_node')
 
-        # ---------------- Parameter YAW (putar) ----------------
         self.declare_parameter('kp_yaw', 1.0)
         self.declare_parameter('offset_enter', 0.18)   # mulai berputar kalau offset > ini
         self.declare_parameter('offset_exit', 0.08)    # berhenti berputar kalau offset < ini
@@ -20,14 +19,12 @@ class FollowControllerNode(Node):
         self.declare_parameter('max_yaw', 0.6)
         self.declare_parameter('min_yaw_command', 0.22)
 
-        # ---------------- Parameter JARAK (3 zona) ----------------
         self.declare_parameter('far_threshold_m', 0.3)   # di atas ini -> MAJU
         self.declare_parameter('near_threshold_m', 0.2)  # di bawah ini -> MUNDUR
         self.declare_parameter('forward_speed', 0.35)    # kecepatan maju tetap (bukan proporsional)
         self.declare_parameter('backward_speed', 0.30)   # kecepatan mundur tetap
         self.declare_parameter('max_valid_distance_m', 5.0)
 
-        # ---------------- Parameter umum ----------------
         self.declare_parameter('lost_timeout_s', 0.5)
 
         self.kp_yaw = self.get_parameter('kp_yaw').value
@@ -45,7 +42,6 @@ class FollowControllerNode(Node):
 
         self.lost_timeout = self.get_parameter('lost_timeout_s').value
 
-        # ---------------- State ----------------
         self.target_locked = False
         self.position = None
         self.last_position_time = None
