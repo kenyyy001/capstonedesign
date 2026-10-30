@@ -3,18 +3,26 @@
 #include <math.h>
 #include <Adafruit_BNO055.h>
 
-
-#define DEBUG_MONITOR 0
+// =====================================================
+// 0. SAKLAR DAN TANDA (SESUAIKAN DENGAN KODE ANDA)
+// =====================================================
+#define DEBUG_MONITOR 0          // 1 = status ringkas; matikan saat dipakai bersama bridge ROS2
 const bool ENABLE_ENCODER_PID = true;
 
+// Samakan dengan handler V Anda yang sekarang:
+//   handler lama "linear_y = -vy" -> VY_SIGN = -1
+//   handler lama "linear_y =  vy" -> VY_SIGN = +1
 const float VX_SIGN = +1.0f;
-const float VY_SIGN = -1-1.0f;
-const float W_SIGN = +1.0f;
-const float HEADING_SIGN = +1.0f;
+const float VY_SIGN = -1.0f;
+const float W_SIGN  = +1.0f;
+const float HEADING_SIGN = +1.0f;   // balik ke -1 jika heading hold menambah putaran
 
+// =====================================================
+// 1. PIN
+// =====================================================
 const uint8_t IN_A[3] = {23, 18, 13};
-const uint8_t IN_B[3] = {19, 4, 2};
-const int MOTOR_POL[3] = {+1, +1, -1};
+const uint8_t IN_B[3] = {19,  4,  2};
+const int MOTOR_POL[3] = {+1, +1, -1};   // motor 3 dibalik (sama seperti program lama)
 
 #define ENC1_A 36
 #define ENC1_B 39
@@ -23,39 +31,39 @@ const int MOTOR_POL[3] = {+1, +1, -1};
 #define ENC3_A 32
 #define ENC3_B 33
 
-#define PWM_FREQ 5000
-#define PWM_RESOLUTION 8
+// =====================================================
+// 2. PWM (kompatibel Arduino core 2.x dan 3.x)
+// =====================================================
+#define PWM_FREQ        5000
+#define PWM_RESOLUTION  8
 
 if ESP_ARDUINO_VERSION_MAJOR >= 3
-    #define PWM_ATTACH(pin, ch) ledcAttach(pin, PWM_FREQ, PWM_RESOLUTION)
-    #define PWM_WRITE(pin, ch, value) ledcWrite(pin, duty)
-
-else 
-    #define PWM_ATTACH(pin, ch) do { ledcSetup(ch, PWM_FREQ, PWM_RESOLUTION); ledcAttachPin(pin, ch); } while(0)
-    #define PWM_WRITE(pin, ch, duty) ledcWrite(ch, duty)
+  #define PWM_ATTACH(pin, ch)       ledcAttach(pin, PWM_FREQ, PWM_RESOLUTION)
+  #define PWM_WRITE(pin, ch, duty)  ledcWrite(pin, duty)
+else
+  #define PWM_ATTACH(pin, ch)       do { ledcSetup(ch, PWM_FREQ, PWM_RESOLUTION); ledcAttachPin(pin, ch); } while (0)
+  #define PWM_WRITE(pin, ch, duty)  ledcWrite(ch, duty)
 endif
 
-
-const int PPR = 1640;
+// =====================================================
+// 3. ENCODER DAN RODA
+// =====================================================
+const int   PPR = 1640;
 const float WHEEL_RADIUS_CM = 2.9f;
 const float CM_PER_PULSE = (2.0f * PI * WHEEL_RADIUS_CM) / PPR;
 
 volatile long encCount[3] = {0, 0, 0};
-float speedFilt[3] = {0, 0, 0};
+float speedFilt[3] = {0, 0, 0};          // cm/s, sudah difilter
 const float SPEED_ALPHA = 0.4f;
 
 void IRAM_ATTR encoderISR1() {
     long c = encCount[0];
-    encCount[0] = ((digitalRead(ENC1_A) == HIGH) != (digitalRead(ENC1_B) == LOW)) ? c-1 : c + 1;
-    
+    encCount[0] = ((digitalRead(ENC1_A) == HIGH) != (digitalRead(ENC1_B) == LOW)) ? c - 1 : c + 1;
 }
-
-void IRAM_ATTR encoderISR2(){
+void IRAM_ATTR encoderISR2() {
     long c = encCount[1];
     encCount[1] = ((digitalRead(ENC2_A) == HIGH) != (digitalRead(ENC2_B) == LOW)) ? c - 1 : c + 1;
-
 }
-
 void IRAM_ATTR encoderISR3() {
     long c = encCount[2];
     encCount[2] = ((digitalRead(ENC3_A) == HIGH) != (digitalRead(ENC3_B) == LOW)) ? c - 1 : c + 1;
@@ -64,7 +72,7 @@ void IRAM_ATTR encoderISR3() {
 void updateEncoderSpeed(float dt) {
     long c[3];
     noInterrupts();
-    for (int i = 0; i < 3; i++) { c[i] = encCount[i]; encCount[i] = 0;}
+    for (int i = 0; i < 3; i++) { c[i] = encCount[i]; encCount[i] = 0; }
     interrupts();
     for (int i = 0; i < 3; i++) {
         float raw = fabsf((float)c[i]) * CM_PER_PULSE / dt;
@@ -72,23 +80,26 @@ void updateEncoderSpeed(float dt) {
     }
 }
 
+// =====================================================
+// 4. INVERSE KINEMATICS (matriks dosen)
+// =====================================================
+// Baris matriks: [V3; V2; V1], kolom: [x, y, omega]
 const float matrix_kecepatan[9] = {
-    -0.333f, 0.5774f, 0.0317f,
-    -0.333f, -05774f, 0.0317f,
-    0.6667f, 0.0000f, 0.0317f
-
+    -0.3333f,  0.5774f, 0.0317f,
+    -0.3333f, -0.5774f, 0.0317f,
+     0.6667f,  0.0000f, 0.0317f
 };
 
-const float MAX_WHEEL_SPEED = 5.0f;
-const int PWM_AT_MAX_SPEED = 80;
+const float MAX_WHEEL_SPEED  = 5.0f;    // cm/s
+const int   PWM_AT_MAX_SPEED = 80;
 
+// Perintah linear 0.35 (maju lurus) = kecepatan roda maksimum
 const float LIN_CMD_FULL = 0.35f;
 const float GAIN_LIN = MAX_WHEEL_SPEED / (0.5774f * LIN_CMD_FULL);
-
+// Perintah putar 0.6 = roda berputar 4 cm/s
 const float ROT_CMD_FULL = 0.6f;
 const float ROT_WHEEL_SPEED_AT_FULL = 4.0f;
 const float GAIN_ROT = ROT_WHEEL_SPEED_AT_FULL / (0.0317f * ROT_CMD_FULL);
-
 
 void inverseKinematics(float vx, float vy, float w, float scale, float out[3]) {
     const float* m = matrix_kecepatan;
@@ -97,6 +108,7 @@ void inverseKinematics(float vx, float vy, float w, float scale, float out[3]) {
     float v1 = GAIN_LIN * (m[6] * vx + m[7] * vy) + GAIN_ROT * (m[8] * w);
     out[0] = v1; out[1] = v2; out[2] = v3;
 
+    // Skala turun (arah tetap) jika ada roda melebihi batas
     float limit = MAX_WHEEL_SPEED * scale;
     float peak = fmaxf(fabsf(v1), fmaxf(fabsf(v2), fabsf(v3)));
     if (peak > limit && peak > 0.0001f) {
@@ -105,21 +117,23 @@ void inverseKinematics(float vx, float vy, float w, float scale, float out[3]) {
     }
 }
 
-
+// =====================================================
+// 5. PWM MINIMUM, RAMP, PID
+// =====================================================
 const int PWM_MIN_INA[3] = {75, 50, 60};
 const int PWM_MIN_INB[3] = {55, 50, 60};
 
-const float WHEEL_ACCEL = 12.0f;
+const float WHEEL_ACCEL = 12.0f;   // cm/s^2
 const float WHEEL_DECEL = 15.0f;
-const float V_START = 0.6f;
-const float V_STOP  = 0.3f;
+const float V_START = 0.6f;        // roda mulai aktif di atas ini
+const float V_STOP  = 0.3f;        // roda mati di bawah ini (histeresis)
 
-float goalWheel[3] = {0, 0, 0};
-float rampWheel[3] = {0, 0, 0};
-bool wheelOn[3]    = {false, false, false};
+float goalWheel[3] = {0, 0, 0};    // target akhir (cm/s, bertanda)
+float rampWheel[3] = {0, 0, 0};    // target setelah ramp
+bool  wheelOn[3]   = {false, false, false};
 
 struct PID { float Kp, Ki, Kd, integral, lastError; };
-PID pidWheel[3] = { {1.5f, 00.1f, 0.0f, 0, 0}, {1.5f, 0.1f, 0.0f, 0, 0}, {1.5f, 0.1f, 0.0f, 0, 0}}
+PID pidWheel[3] = { {1.5f, 0.1f, 0.0f, 0, 0}, {1.5f, 0.1f, 0.0f, 0, 0}, {1.5f, 0.1f, 0.0f, 0, 0} };
 const float PID_LIMIT = 15.0f;
 
 void resetPID(PID &p) { p.integral = 0; p.lastError = 0; }
@@ -128,7 +142,7 @@ float updatePID(PID &p, float target, float actual, float dt) {
     float err = target - actual;
     p.integral = constrain(p.integral + err * dt, -30.0f, 30.0f);
     float d = (err - p.lastError) / dt;
-    p.;astError = err;
+    p.lastError = err;
     return constrain(p.Kp * err + p.Ki * p.integral + p.Kd * d, -PID_LIMIT, PID_LIMIT);
 }
 
@@ -143,15 +157,12 @@ void setMotorPWM(int i, float signedPWM) {
     if (signedPWM > 0.0f) {
         PWM_WRITE(IN_B[i], 2 * i + 1, 0);
         PWM_WRITE(IN_A[i], 2 * i, pwm);
-    }
-    else if (signedPWM < 0.0f) {
+    } else if (signedPWM < 0.0f) {
         PWM_WRITE(IN_A[i], 2 * i, 0);
         PWM_WRITE(IN_B[i], 2 * i + 1, pwm);
-
-    }
-    else {
+    } else {
         PWM_WRITE(IN_A[i], 2 * i, 0);
-        PWM_WRITE(IN_B[i], 2 * i 1, 0);
+        PWM_WRITE(IN_B[i], 2 * i + 1, 0);
     }
 }
 
@@ -162,23 +173,27 @@ void updateWheel(int i, float dt) {
     if (!wheelOn[i] && mag > V_START) wheelOn[i] = true;
     else if (wheelOn[i] && mag < V_STOP) wheelOn[i] = false;
 
-    if(!wheelOn[i]) {
+    if (!wheelOn[i]) {
         setMotorPWM(i, 0);
         resetPID(pidWheel[i]);
         return;
     }
-     int dir = (target > 0.0f) ? 1 : -1;
-     int elec = dir * MOTOR_POL[i];
-     int minPWM = (elec > 0) ? PWM_MIN_INA[i] : PWM_MIN_INB[i];
 
-     float ratio - constrain(mag / MAX_WHEEL_SPEED, 0.0f, 1.0f);
-     float pwm = minPWM + ratio * (PWM_AT_MAX_SPEED - minPWM);
-     if (ENABLE_ENCODER_PID) pwm += updatePID(pidWheel[i], mag, speedFilt[i], dt);
-     pwm = constrain(pwm, (float)minPWM, 255.0f);
+    int dir  = (target > 0.0f) ? 1 : -1;
+    int elec = dir * MOTOR_POL[i];                       // arah listrik sebenarnya
+    int minPWM = (elec > 0) ? PWM_MIN_INA[i] : PWM_MIN_INB[i];
 
-     setMotorPWM(i, elec, * pwm);
+    float ratio = constrain(mag / MAX_WHEEL_SPEED, 0.0f, 1.0f);
+    float pwm = minPWM + ratio * (PWM_AT_MAX_SPEED - minPWM);
+    if (ENABLE_ENCODER_PID) pwm += updatePID(pidWheel[i], mag, speedFilt[i], dt);
+    pwm = constrain(pwm, (float)minPWM, 255.0f);
+
+    setMotorPWM(i, elec * pwm);
 }
 
+// =====================================================
+// 6. BNO055 DAN HEADING HOLD
+// =====================================================
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
 bool  bnoReady = false;
 float currentYaw = 0.0f, headingTarget = 0.0f;
@@ -208,7 +223,10 @@ float updateHeadingPID(float errDeg, float dt) {
     return constrain(out, -HEADING_PID_LIMIT, HEADING_PID_LIMIT);
 }
 
-float cmdX = 0, cmdY = 0, cmdW = 0, cmdScale = 1.0f;   
+// =====================================================
+// 7. PERINTAH
+// =====================================================
+float cmdX = 0, cmdY = 0, cmdW = 0, cmdScale = 1.0f;   // perintah asli (tidak ditimpa firmware)
 bool  remoteMode = false;
 unsigned long lastRemoteCmd = 0;
 const unsigned long REMOTE_TIMEOUT_MS = 500;
@@ -216,7 +234,7 @@ const unsigned long REMOTE_TIMEOUT_MS = 500;
 const float KEY_LIN = 0.35f;
 const float KEY_ROT = 0.5f;
 
-void stopRobot() {                       
+void stopRobot() {                       // berhenti seketika (watchdog, tombol x)
     cmdX = cmdY = cmdW = 0.0f;
     cmdScale = 1.0f;
     for (int i = 0; i < 3; i++) {
@@ -252,6 +270,7 @@ void keyboardCommand(char c) {
     Serial.printf(">>> %c\n", c);
 }
 
+// "V vx vy w s" dari bridge ROS2. Nol semua = berhenti HALUS lewat ramp.
 void handleV(float vx, float vy, float w, float s) {
     s = constrain(s, 0.0f, 1.0f);
     bool zero = (fabsf(vx) < 1e-4f && fabsf(vy) < 1e-4f && fabsf(w) < 1e-4f) || s < 0.01f;
@@ -268,6 +287,7 @@ void handleV(float vx, float vy, float w, float s) {
     lastRemoteCmd = millis();
 }
 
+// ---------- Pembaca serial non-blocking ----------
 char rxBuf[64];
 uint8_t rxLen = 0;
 unsigned long rxLast = 0;
@@ -277,7 +297,7 @@ void flushMessage() {
     rxBuf[rxLen] = 0;
     float v[4];
     int n = 0;
-    char *p = rxBuf + 1;                 
+    char *p = rxBuf + 1;                 // lewati 'v'
     while (n < 4) {
         while (*p == ' ' || *p == ',' || *p == '\t') p++;
         if (!*p) break;
@@ -297,19 +317,25 @@ void readSerial() {
         rxLast = millis();
         if (ch == '\n' || ch == '\r') { flushMessage(); continue; }
 
-        if (ch == 'v' || ch == 'V') {            
+        if (ch == 'v' || ch == 'V') {            // awal pesan V baru
             flushMessage();
             rxBuf[rxLen++] = 'v';
-        } else if (rxLen > 0) {                  
+        } else if (rxLen > 0) {                  // isi angka pesan V
             if (rxLen < sizeof(rxBuf) - 1) rxBuf[rxLen++] = ch;
-        } else if (isalpha((unsigned char)ch)) {
+        } else if (isalpha((unsigned char)ch)) { // perintah keyboard 1 huruf
             keyboardCommand(tolower(ch));
         }
     }
+    // Pesan tanpa newline: anggap selesai setelah hening 10 ms
     if (rxLen > 0 && millis() - rxLast > 10) flushMessage();
 }
 
+// =====================================================
+// 8. LANGKAH KONTROL (tiap 50 ms)
+// =====================================================
 void controlStep(float dt) {
+    // Heading hold hanya saat bergerak translasi dan tanpa perintah putar.
+    // Hasilnya TIDAK menimpa cmdW.
     float w = cmdW;
     bool translating = (fabsf(cmdX) + fabsf(cmdY)) > 0.02f;
     if (bnoReady && translating && fabsf(cmdW) < 0.01f) {
@@ -331,6 +357,9 @@ void controlStep(float dt) {
     }
 }
 
+// =====================================================
+// 9. SETUP DAN LOOP
+// =====================================================
 void setup() {
     Serial.begin(115200);
 
@@ -378,9 +407,9 @@ if DEBUG_MONITOR
                           speedFilt[0], speedFilt[1], speedFilt[2], currentYaw);
         }
 endif
-
     }
 
+    // Watchdog: perintah ROS2 hilang -> berhenti
     if (remoteMode && (now - lastRemoteCmd > REMOTE_TIMEOUT_MS)) {
         stopRobot();
     }
