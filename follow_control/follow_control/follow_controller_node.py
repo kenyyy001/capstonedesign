@@ -12,17 +12,25 @@ class FollowControllerNode(Node):
     def __init__(self):
         super().__init__('follow_controller_node')
 
+        # ---------------- YAW (orientasi badan) ----------------
         self.declare_parameter('kp_yaw', 1.0)
-        self.declare_parameter('offset_enter', 0.18)   # mulai berputar kalau offset > ini
-        self.declare_parameter('offset_exit', 0.08)    # berhenti berputar kalau offset < ini
-        self.declare_parameter('offset_smoothing_alpha', 0.3)  # 0..1, makin kecil makin halus (lebih lambat merespons)
+        self.declare_parameter('offset_enter', 0.18)
+        self.declare_parameter('offset_exit', 0.08)
+        self.declare_parameter('offset_smoothing_alpha', 0.3)
         self.declare_parameter('max_yaw', 0.6)
         self.declare_parameter('min_yaw_command', 0.22)
 
-        self.declare_parameter('far_threshold_m', 0.3)   # di atas ini -> MAJU
-        self.declare_parameter('near_threshold_m', 0.2)  # di bawah ini -> MUNDUR
-        self.declare_parameter('forward_speed', 0.35)    # kecepatan maju tetap (bukan proporsional)
-        self.declare_parameter('backward_speed', 0.30)   # kecepatan mundur tetap
+        # ---------------- STRAFE (gerak menyilang, HOLONOMIC) ----------------
+        self.declare_parameter('kp_strafe', 1.0)
+        self.declare_parameter('strafe_deadband', 0.05)   # mati dekat tengah
+        self.declare_parameter('max_strafe', 0.30)
+        self.declare_parameter('min_strafe_command', 0.10)
+
+        # ---------------- JARAK (3 zona) ----------------
+        self.declare_parameter('far_threshold_m', 0.3)
+        self.declare_parameter('near_threshold_m', 0.2)
+        self.declare_parameter('forward_speed', 0.35)
+        self.declare_parameter('backward_speed', 0.30)
         self.declare_parameter('max_valid_distance_m', 5.0)
 
         self.declare_parameter('lost_timeout_s', 0.5)
@@ -33,6 +41,11 @@ class FollowControllerNode(Node):
         self.smoothing_alpha = self.get_parameter('offset_smoothing_alpha').value
         self.max_yaw = self.get_parameter('max_yaw').value
         self.min_yaw_command = self.get_parameter('min_yaw_command').value
+
+        self.kp_strafe = self.get_parameter('kp_strafe').value
+        self.strafe_deadband = self.get_parameter('strafe_deadband').value
+        self.max_strafe = self.get_parameter('max_strafe').value
+        self.min_strafe_command = self.get_parameter('min_strafe_command').value
 
         self.far_threshold = self.get_parameter('far_threshold_m').value
         self.near_threshold = self.get_parameter('near_threshold_m').value
@@ -47,18 +60,18 @@ class FollowControllerNode(Node):
         self.last_position_time = None
         self.last_state = None
 
-        self.filtered_offset = 0.0     # hasil smoothing EMA
-        self.is_turning = False        # state histeresis yaw
+        self.filtered_offset = 0.0
+        self.is_turning = False
+        self.distance_state = 'STOP'
 
-        self.distance_state = 'STOP'   
         self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, 10)
         self.create_subscription(Point, '/vision/target_position', self.position_callback, 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        self.create_timer(1.0 / 20.0, self.control_loop)  # 20 Hz
+        self.create_timer(1.0 / 20.0, self.control_loop)
 
         self.get_logger().info(
-            f'Follow controller v2 siap. Zona jarak: maju>{self.far_threshold}m, '
+            f'Follow controller v3 (holonomic strafe) siap. Zona jarak: maju>{self.far_threshold}m, '
             f'mundur<{self.near_threshold}m')
 
     def locked_callback(self, msg):
@@ -74,12 +87,10 @@ class FollowControllerNode(Node):
         age = (self.get_clock().now() - self.last_position_time).nanoseconds * 1e-9
         return age < self.lost_timeout
 
-    def compute_yaw(self, offset_raw):
-        """Histeresis + EMA smoothing supaya robot tidak bolak-balik mencari tengah."""
-        a = self.smoothing_alpha
-        self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
-
-        magnitude = abs(self.filtered_offset)
+    def compute_yaw(self, filtered_offset):
+        """Putar badan supaya lurus. Berjalan BERSAMAAN dengan strafe (lihat control_loop),
+        bukan menunggu strafe selesai -- itu prinsip holonomic yang Anda minta."""
+        magnitude = abs(filtered_offset)
 
         if self.is_turning:
             if magnitude < self.offset_exit:
@@ -91,13 +102,31 @@ class FollowControllerNode(Node):
         if not self.is_turning:
             return 0.0
 
-        value = -self.kp_yaw * self.filtered_offset
+        value = -self.kp_yaw * filtered_offset
         value = max(-self.max_yaw, min(self.max_yaw, value))
+
+        if abs(value) < self.min_yaw_command:
+            value = math.copysign(self.min_yaw_command, value)
 
         return value
 
+    def compute_strafe(self, filtered_offset):
+        """Gerak menyilang sebanding offset marker dari tengah frame.
+        Dihitung dari offset yang SAMA dengan compute_yaw, di tick yang sama,
+        sehingga robot langsung memotong miring sambil badan pelan-pelan lurus."""
+        if abs(filtered_offset) <= self.strafe_deadband:
+            return 0.0
+
+        e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
+        value = self.kp_strafe * e
+        value = max(-self.max_strafe, min(self.max_strafe, value))
+
+        if abs(value) < self.min_strafe_command:
+            value = math.copysign(self.min_strafe_command, value)
+            
+        return value
+
     def compute_forward(self, distance):
-        """Kontrol jarak 3 zona dengan histeresis (bukan proporsional)."""
         if distance > self.far_threshold:
             self.distance_state = 'FORWARD'
         elif distance < self.near_threshold:
@@ -113,16 +142,22 @@ class FollowControllerNode(Node):
         return 0.0
 
     def control_loop(self):
-        cmd = Twist()  
+        cmd = Twist()
         state = 'HILANG'
 
         if self.target_locked and self.position is not None and self.position_is_fresh():
-            offset = self.position.x
+            offset_raw = self.position.x
             distance = self.position.y
+
+            a = self.smoothing_alpha
+            self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
+
             if 0.0 < distance <= self.max_valid_distance:
                 cmd.linear.x = self.compute_forward(distance)
-                cmd.angular.z = self.compute_yaw(offset)
-                state = f'MENGIKUTI (jarak_state={self.distance_state}, turning={self.is_turning})'
+                cmd.linear.y = self.compute_strafe(self.filtered_offset)
+                cmd.angular.z = self.compute_yaw(self.filtered_offset)
+                state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
+                         f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
         else:
             self.distance_state = 'STOP'
             self.is_turning = False
