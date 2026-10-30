@@ -98,8 +98,8 @@ void inverseKinematics(float vx, float vy, float w, float scale, float out[3]) {
     }
 }
 
-const int PWM_MIN_INA[3] = {75, 60, 60};
-const int PWM_MIN_INB[3] = {55, 60, 60};
+const int PWM_MIN_INA[3] = {60, 60, 60};     
+const int PWM_MIN_INB[3] = {60, 60, 60};
 
 const float WHEEL_ACCEL = 12.0f;
 const float WHEEL_DECEL = 15.0f;
