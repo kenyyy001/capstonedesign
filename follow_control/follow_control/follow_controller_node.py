@@ -1,146 +1,187 @@
 #!/usr/bin/env python3
+import math
+
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import Bool
-from geometry_msgs.msg import Point
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
+from geometry_msgs.msg import Point, Twist
 
-import cv2
-import numpy as np
-import threading
-import time
 
-class RealTimeCamera:
-    def __init__(self, source, w, h):
-        self.cap = cv2.VideoCapture(source)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
-        self.ret = False
-        self.frame = None
-        self.running = True
-        self.thread = threading.Thread(target=self._update, daemon=True)
-        self.thread.start()
-
-    def _update(self):
-        while self.running:
-            ret, frame = self.cap.read()
-            if ret:
-                self.ret = ret
-                self.frame = frame
-            else:
-                time.sleep(0.01)
-
-    def read(self):
-        return self.ret, self.frame
-
-    def release(self):
-        self.running = False
-        self.cap.release()
-
-class ArucoLockNode(Node):
+class FollowControllerNode(Node):
     def __init__(self):
-        super().__init__('aruco_lock_node')
+        super().__init__('follow_controller_node')
 
-        self.declare_parameter('camera_source', '/dev/video0')
-        self.declare_parameter('frame_width', 320)  
-        self.declare_parameter('frame_height', 240) 
-        self.declare_parameter('marker_size_m', 0.05)
-        self.declare_parameter('target_marker_id', -1)
-        self.declare_parameter('camera_focal_px', 290.0) 
+        # ---------------- YAW (orientasi badan) ----------------
+        self.declare_parameter('kp_yaw', 1.0)
+        self.declare_parameter('offset_enter', 0.18)
+        self.declare_parameter('offset_exit', 0.08)
+        self.declare_parameter('offset_smoothing_alpha', 0.3)
+        self.declare_parameter('max_yaw', 0.6)
+        self.declare_parameter('min_yaw_command', 0.22)
 
-        camera_source = self.get_parameter('camera_source').value
-        self.frame_w = self.get_parameter('frame_width').value
-        self.frame_h = self.get_parameter('frame_height').value
-        self.marker_size_m = self.get_parameter('marker_size_m').value
-        self.target_marker_id = self.get_parameter('target_marker_id').value
-        self.focal_px = self.get_parameter('camera_focal_px').value
+        # ---------------- STRAFE (gerak menyilang, HOLONOMIC) ----------------
+        self.declare_parameter('kp_strafe', 1.0)
+        self.declare_parameter('strafe_deadband', 0.05)   # mati dekat tengah
+        self.declare_parameter('max_strafe', 0.30)
+        self.declare_parameter('min_strafe_command', 0.10)
 
-        self.cam = RealTimeCamera(camera_source, self.frame_w, self.frame_h)
-        self.bridge = CvBridge()
+        # ---------------- JARAK (3 zona) ----------------
+        self.declare_parameter('far_threshold_m', 0.3)
+        self.declare_parameter('near_threshold_m', 0.2)
+        self.declare_parameter('forward_speed', 0.35)
+        self.declare_parameter('backward_speed', 0.30)
+        self.declare_parameter('max_valid_distance_m', 5.0)
 
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        self.aruco_params = cv2.aruco.DetectorParameters()
-        self.aruco_params.minMarkerPerimeterRate = 0.08
-        self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        self.declare_parameter('lost_timeout_s', 0.5)
 
-        qos_profile = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE
-        )
+        self.kp_yaw = self.get_parameter('kp_yaw').value
+        self.offset_enter = self.get_parameter('offset_enter').value
+        self.offset_exit = self.get_parameter('offset_exit').value
+        self.smoothing_alpha = self.get_parameter('offset_smoothing_alpha').value
+        self.max_yaw = self.get_parameter('max_yaw').value
+        self.min_yaw_command = self.get_parameter('min_yaw_command').value
 
-        self.locked_pub = self.create_publisher(Bool, '/vision/target_locked', qos_profile)
-        self.position_pub = self.create_publisher(Point, '/vision/target_position', qos_profile)
-        # Tambahan publisher untuk mengirim gambar mentah ke Laptop via ROS2
-        self.image_pub = self.create_publisher(Image, '/vision/camera_image', qos_profile)
+        self.kp_strafe = self.get_parameter('kp_strafe').value
+        self.strafe_deadband = self.get_parameter('strafe_deadband').value
+        self.max_strafe = self.get_parameter('max_strafe').value
+        self.min_strafe_command = self.get_parameter('min_strafe_command').value
 
-        self.locked_id = None
-        self.create_timer(1.0 / 30.0, self.process_frame)
-        self.get_logger().info('Aruco Lock Node Ringan (Tanpa Flask) Siap.')
+        self.far_threshold = self.get_parameter('far_threshold_m').value
+        self.near_threshold = self.get_parameter('near_threshold_m').value
+        self.forward_speed = self.get_parameter('forward_speed').value
+        self.backward_speed = self.get_parameter('backward_speed').value
+        self.max_valid_distance = self.get_parameter('max_valid_distance_m').value
 
-    def process_frame(self):
-        ret, frame = self.cam.read()
-        if not ret or frame is None:
-            return
+        self.lost_timeout = self.get_parameter('lost_timeout_s').value
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = self.detector.detectMarkers(gray)
-        target_found = False
+        self.target_locked = False
+        self.position = None
+        self.last_position_time = None
+        self.last_state = None
 
-        if ids is not None:
-            ids_flat = ids.flatten()
-            if self.locked_id is None:
-                self.locked_id = self.target_marker_id if self.target_marker_id != -1 else int(ids_flat[0])
+        self.filtered_offset = 0.0
+        self.is_turning = False
+        self.distance_state = 'STOP'
 
-            if self.locked_id in ids_flat:
-                idx = list(ids_flat).index(self.locked_id)
-                marker_corners = corners[idx][0]
-                target_found = True
+        self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, 10)
+        self.create_subscription(Point, '/vision/target_position', self.position_callback, 10)
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-                center_x = float(np.mean(marker_corners[:, 0]))
-                center_y = float(np.mean(marker_corners[:, 1]))
-                offset_x = (center_x - (self.frame_w / 2.0)) / (self.frame_w / 2.0)
+        self.create_timer(1.0 / 20.0, self.control_loop)
 
-                side_lengths = [np.linalg.norm(marker_corners[i] - marker_corners[(i + 1) % 4]) for i in range(4)]
-                avg_side_px = float(np.mean(side_lengths))
-                distance_m = (self.marker_size_m * self.focal_px) / avg_side_px if avg_side_px > 0 else 0.0
+        self.get_logger().info(
+            f'Follow controller v3 (holonomic strafe) siap. Zona jarak: maju>{self.far_threshold}m, '
+            f'mundur<{self.near_threshold}m')
 
-                pos_msg = Point(x=offset_x, y=distance_m, z=0.0)
-                self.position_pub.publish(pos_msg)
+    def locked_callback(self, msg):
+        self.target_locked = msg.data
 
-                # Gambar info tracking langsung pada frame mentah
-                cv2.polylines(frame, [marker_corners.astype(int)], True, (0, 0, 255), 2)
-                cv2.circle(frame, (int(center_x), int(center_y)), 4, (0, 0, 255), -1)
-                cv2.putText(frame, f'ID:{self.locked_id} {distance_m:.2f}m', (int(center_x) - 40, int(center_y) - 15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+    def position_callback(self, msg):
+        self.position = msg
+        self.last_position_time = self.get_clock().now()
 
-        self.locked_pub.publish(Bool(data=target_found))
+    def position_is_fresh(self):
+        if self.last_position_time is None:
+            return False
+        age = (self.get_clock().now() - self.last_position_time).nanoseconds * 1e-9
+        return age < self.lost_timeout
 
-        # Kirim frame mentah berkecepatan tinggi ke Laptop melalui ROS2 topic
-        try:
-            img_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-            self.image_pub.publish(img_msg)
-        except Exception as e:
-            pass
+    def compute_yaw(self, filtered_offset):
+        """Putar badan supaya lurus. Berjalan BERSAMAAN dengan strafe (lihat control_loop),
+        bukan menunggu strafe selesai -- itu prinsip holonomic yang Anda minta."""
+        magnitude = abs(filtered_offset)
 
-    def destroy_node(self):
-        self.cam.release()
-        super().destroy_node()
+        if self.is_turning:
+            if magnitude < self.offset_exit:
+                self.is_turning = False
+        else:
+            if magnitude > self.offset_enter:
+                self.is_turning = True
+
+        if not self.is_turning:
+            return 0.0
+
+        value = -self.kp_yaw * filtered_offset
+        value = max(-self.max_yaw, min(self.max_yaw, value))
+
+        if abs(value) < self.min_yaw_command:
+            value = math.copysign(self.min_yaw_command, value)
+
+        return value
+
+    def compute_strafe(self, filtered_offset):
+        """Gerak menyilang sebanding offset marker dari tengah frame.
+        Dihitung dari offset yang SAMA dengan compute_yaw, di tick yang sama,
+        sehingga robot langsung memotong miring sambil badan pelan-pelan lurus."""
+        if abs(filtered_offset) <= self.strafe_deadband:
+            return 0.0
+
+        e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
+        value = self.kp_strafe * e
+        value = max(-self.max_strafe, min(self.max_strafe, value))
+
+        if abs(value) < self.min_strafe_command:
+            value = math.copysign(self.min_strafe_command, value)
+            
+        return value
+
+    def compute_forward(self, distance):
+        if distance > self.far_threshold:
+            self.distance_state = 'FORWARD'
+        elif distance < self.near_threshold:
+            self.distance_state = 'BACKWARD'
+        else:
+            if self.distance_state != 'BACKWARD':
+                self.distance_state = 'STOP'
+
+        if self.distance_state == 'FORWARD':
+            return self.forward_speed
+        elif self.distance_state == 'BACKWARD':
+            return -self.backward_speed
+        return 0.0
+
+    def control_loop(self):
+        cmd = Twist()
+        state = 'HILANG'
+
+        if self.target_locked and self.position is not None and self.position_is_fresh():
+            offset_raw = self.position.x
+            distance = self.position.y
+
+            a = self.smoothing_alpha
+            self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
+
+            if 0.0 < distance <= self.max_valid_distance:
+                cmd.linear.x = self.compute_forward(distance)
+                cmd.linear.y = self.compute_strafe(self.filtered_offset)
+                cmd.angular.z = self.compute_yaw(self.filtered_offset)
+                state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
+                         f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
+        else:
+            self.distance_state = 'STOP'
+            self.is_turning = False
+            self.filtered_offset = 0.0
+
+        self.cmd_pub.publish(cmd)
+
+        if state != self.last_state:
+            self.get_logger().info(f'Status: {state}')
+            self.last_state = state
+
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ArucoLockNode()
+    node = FollowControllerNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
