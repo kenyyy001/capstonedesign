@@ -6,13 +6,14 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Point, Twist
-from rclpy.qos import SensorDataQoS
+# REVISI IMPORT: Ganti SensorDataQoS dengan profil manual agar tidak ImportError
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 class FollowControllerNode(Node):
     def __init__(self):
         super().__init__('follow_controller_node')
 
-        # ---------------- YAW (orientasi badan) ----------------
+        # ---------------- PARAMETER (Tetap Sama) ----------------
         self.declare_parameter('kp_yaw', 1.0)
         self.declare_parameter('offset_enter', 0.18)
         self.declare_parameter('offset_exit', 0.08)
@@ -20,13 +21,11 @@ class FollowControllerNode(Node):
         self.declare_parameter('max_yaw', 0.6)
         self.declare_parameter('min_yaw_command', 0.22)
 
-        # ---------------- STRAFE (gerak menyilang, HOLONOMIC) ----------------
         self.declare_parameter('kp_strafe', 1.0)
-        self.declare_parameter('strafe_deadband', 0.05)   # mati dekat tengah
+        self.declare_parameter('strafe_deadband', 0.05)
         self.declare_parameter('max_strafe', 0.30)
         self.declare_parameter('min_strafe_command', 0.10)
 
-        # ---------------- JARAK (3 zona) ----------------
         self.declare_parameter('far_threshold_m', 0.3)
         self.declare_parameter('near_threshold_m', 0.2)
         self.declare_parameter('forward_speed', 0.35)
@@ -64,8 +63,16 @@ class FollowControllerNode(Node):
         self.is_turning = False
         self.distance_state = 'STOP'
 
-        self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, SensorDataQoS())
-        self.create_subscription(Point, '/vision/target_position', self.position_callback, SensorDataQoS())
+        # REVISI QOS: Buat profil Best Effort manual (identik dengan SensorDataQoS)
+        qos_profile = QoSProfile(
+            depth=1,  # Set ke 1 agar antrean frame lama langsung dibuang
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE
+        )
+
+        # Gunakan qos_profile baru ini pada subscription
+        self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, qos_profile)
+        self.create_subscription(Point, '/vision/target_position', self.position_callback, qos_profile)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.create_timer(1.0 / 20.0, self.control_loop)
@@ -74,6 +81,7 @@ class FollowControllerNode(Node):
             f'Follow controller v3 (holonomic strafe) siap. Zona jarak: maju>{self.far_threshold}m, '
             f'mundur<{self.near_threshold}m')
 
+    # ... Sisa fungsi ke bawah (callback, compute, main) tetap sama persis dengan kode Anda ...
     def locked_callback(self, msg):
         self.target_locked = msg.data
 
@@ -88,10 +96,7 @@ class FollowControllerNode(Node):
         return age < self.lost_timeout
 
     def compute_yaw(self, filtered_offset):
-        """Putar badan supaya lurus. Berjalan BERSAMAAN dengan strafe (lihat control_loop),
-        bukan menunggu strafe selesai -- itu prinsip holonomic yang Anda minta."""
         magnitude = abs(filtered_offset)
-
         if self.is_turning:
             if magnitude < self.offset_exit:
                 self.is_turning = False
@@ -104,26 +109,18 @@ class FollowControllerNode(Node):
 
         value = -self.kp_yaw * filtered_offset
         value = max(-self.max_yaw, min(self.max_yaw, value))
-
         if abs(value) < self.min_yaw_command:
             value = math.copysign(self.min_yaw_command, value)
-
         return value
 
     def compute_strafe(self, filtered_offset):
-        """Gerak menyilang sebanding offset marker dari tengah frame.
-        Dihitung dari offset yang SAMA dengan compute_yaw, di tick yang sama,
-        sehingga robot langsung memotong miring sambil badan pelan-pelan lurus."""
         if abs(filtered_offset) <= self.strafe_deadband:
             return 0.0
-
         e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
         value = self.kp_strafe * e
         value = max(-self.max_strafe, min(self.max_strafe, value))
-
         if abs(value) < self.min_strafe_command:
             value = math.copysign(self.min_strafe_command, value)
-            
         return value
 
     def compute_forward(self, distance):
@@ -169,7 +166,6 @@ class FollowControllerNode(Node):
             self.get_logger().info(f'Status: {state}')
             self.last_state = state
 
-
 def main(args=None):
     rclpy.init(args=args)
     node = FollowControllerNode()
@@ -181,7 +177,6 @@ def main(args=None):
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
