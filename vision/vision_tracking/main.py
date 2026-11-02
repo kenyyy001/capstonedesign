@@ -3,11 +3,11 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Point
-
 import cv2
 import numpy as np
 import threading
 import time
+import logging
 
 from flask import Flask, Response
 
@@ -15,28 +15,52 @@ from flask import Flask, Response
 # ---------------- Flask app (jalan di thread terpisah) ----------------
 flask_app = Flask(__name__)
 frame_lock = threading.Lock()
-output_frame = None  # frame terbaru (sudah digambar overlay), dibaca Flask
+output_frame = None
+frame_seq = 0
 
+stream_cond = threading.Condition()
+latest_jpeg = None
+latest_seq = 0
+
+STREAM_FPS = 12
+STREAM_W, STREAM_H = 480, 360
+JPEG_QUALITY = 55
+
+def encoder_loop():
+    global latest_jpeg, latest_seq
+    last_seq = -1
+    period = 1.0 / STREAM_FPS
+    while True:
+        t0 = time.time()
+        with frame_lock:
+            frame = output_frame
+            seq = frame_seq
+        if frame is not None and seq != last_seq:
+            last_seq = seq
+            small = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+
+            if ok:
+                with stream_cond:
+                    latest_jpeg = buf.tobytes()
+                    latest_seq += 1
+                    stream_cond.notify_all()
+            dt = time.time() - t0
+            if dt < period:
+                time.sleep(period - dt)
 
 def generate_mjpeg():
-    global output_frame
+    last = -1
     while True:
-        with frame_lock:
-            if output_frame is None:
-                time.sleep(0.05)
+        with stream_cond:
+            stream_cond.wait_for(lambda: latest_seq != last, timeout=1.0)
+            if latest_seq == last:
                 continue
-            frame_copy = output_frame.copy()
+            last = latest_seq
+            data = latest_jpeg
 
-        ret, buffer = cv2.imencode('.jpg', frame_copy)
-        if not ret:
-            continue
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
 
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-        time.sleep(0.03)
-
-
-@flask_app.route('/video')
 def video_route():
     return Response(generate_mjpeg(),
                      mimetype='multipart/x-mixed-replace; boundary=frame')
@@ -63,8 +87,51 @@ def index_route():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
 
+class LatestFrameCapture:
+    def __init__(self, src, w, h, fps=30, fourcc='MJPG'):
+        self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+        if fourcc:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        self.cap.set(cv2.CAP_PROP_FPS, fps)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        fcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        self.info = (f"{''.join(chr((fcc >> 8 * i) & 0xFF) for i in range(4))} "
+                     f"{int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+                     f"{int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} "
+                     f"@{self.cap.get(cv2.CAP_PROP_FPS):.0f}")
+        self.lock = threading.Lock()
+        self.frame = None
+        self.seq = 0
+        self.running = True
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
 
-# ---------------- Node ROS2 ----------------
+    def isOpened(self):
+        return self.cap.isOpened()
+
+    def _loop(self):
+        while self.running:
+            ok, f = self.cap.read()
+            if not ok:
+                time.sleep(0.01)
+                continue
+            with self.lock:
+                self.frame = f
+                self.seq += 1
+
+    def read(self, last_seq):
+        with self.lock:
+            if self.frame is None or self.seq == last_seq:
+                return None, last_seq
+            return self.frame, self.seq
+
+    def release(self):
+        self.running = False
+        self.thread.join(timeout=1.0)
+        self.cap.release()
+
 class ArucoLockNode(Node):
     def __init__(self):
         super().__init__('aruco_lock_node')
@@ -83,12 +150,14 @@ class ArucoLockNode(Node):
         self.target_marker_id = self.get_parameter('target_marker_id').value
         self.focal_px = self.get_parameter('camera_focal_px').value
 
-        self.cap = cv2.VideoCapture(camera_source)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_w)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_h)
-
-        if not self.cap.isOpened():
+        self.grabber = LatestFrameCapture(camera_source, self.frame_w, self.frame_h, 30)
+        self.get_logger().info(f'Kamera aktif: {self.grabber.info}')
+        if not self.grabber.isOpened():
             self.get_logger().error(f'Kamera {camera_source} tidak bisa dibuka!')
+        self.last_seq = -1
+        self._t_log = time.time()
+        self._n = 0
+        self._acc = 0.0
 
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params = cv2.aruco.DetectorParameters()
@@ -100,17 +169,28 @@ class ArucoLockNode(Node):
         self.locked_id = None
 
         timer_period = 1.0 / 30.0
-        self.timer = self.create_timer(timer_period, self.process_frame)
+        self.timer = self.create_timer(1.0 / 60.0, self.process_frame)
 
         self.get_logger().info('Aruco Lock Node siap. Buka http://<IP_INI>:5000 untuk visual.')
 
     def process_frame(self):
-        global output_frame
+        global output_frame, frame_seq
 
-        ret, frame = self.cap.read()
-        if not ret:
-            self.get_logger().warning('Gagal membaca frame dari kamera.')
+        frame, seq = self.grabber.read(self.last_seq)
+        if frame is None:
             return
+        self.last_seq = seq
+
+        t0 = time.perf_counter()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = self.detector.detectMarkers(gray)
+        self._acc += time.perf_counter() - t0
+        self._n += 1
+        now = time.time()
+        if now - self._t_log >= 2.0:
+            self.get_logger().info(
+                f'FPS proses={self._n / (now - self._t_log):.1f} | deteksi={1000 * self._acc / self._n:.1f} ms')
+        self._t_log, self._n, self._acc = now, 0, 0.0
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
@@ -140,7 +220,7 @@ class ArucoLockNode(Node):
                 center_x = float(np.mean(marker_corners[:, 0]))
                 center_y = float(np.mean(marker_corners[:, 1]))
 
-                frame_center_x = self.frame_w / 2.0
+                frame_center_x = frame.shape[1] / 2.0
                 offset_x = (center_x - frame_center_x) / frame_center_x
 
                 side_lengths = [
@@ -181,16 +261,24 @@ class ArucoLockNode(Node):
         self.locked_pub.publish(locked_msg)
 
         with frame_lock:
-            output_frame = frame.copy()
+            output_frame = frame
+            frame_seq += 1
 
     def destroy_node(self):
-        self.cap.release()
+        self.grabber.release()
         super().destroy_node()
 
 
 def main(args=None):
+
+    def run_flask():
+        logging.getLogger('werkzeug').setLevel(logging.ERROR)
+        flask_app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
+
     rclpy.init(args=args)
     node = ArucoLockNode()
+
+    threading.Thread(target=encoder_loop, daemon=True).start()
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
