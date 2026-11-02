@@ -4,20 +4,14 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Point
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
 import cv2
 import numpy as np
 import threading
 import time
 
-from flask import Flask, Response
-
-flask_app = Flask(__name__)
-frame_lock = threading.Lock()
-output_frame = None  
-active_clients = 0  # Hitung jumlah browser yang menonton
-
-# --- THREAD KELAS UNTUK MEMBACA KAMERA TANPA BUFFER (REAL-TIME) ---
 class RealTimeCamera:
     def __init__(self, source, w, h):
         self.cap = cv2.VideoCapture(source)
@@ -25,11 +19,9 @@ class RealTimeCamera:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
-        
         self.ret = False
         self.frame = None
         self.running = True
-        
         self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
 
@@ -38,7 +30,7 @@ class RealTimeCamera:
             ret, frame = self.cap.read()
             if ret:
                 self.ret = ret
-                self.frame = frame  # Timpa frame lama secara brutal
+                self.frame = frame
             else:
                 time.sleep(0.01)
 
@@ -49,36 +41,6 @@ class RealTimeCamera:
         self.running = False
         self.cap.release()
 
-def generate_mjpeg():
-    global output_frame, active_clients
-    active_clients += 1
-    try:
-        while True:
-            with frame_lock:
-                if output_frame is None:
-                    time.sleep(0.03)
-                    continue
-                jpeg_bytes = output_frame 
-
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
-            time.sleep(0.04)  # Batasi visual browser di ~25 FPS
-    finally:
-        active_clients -= 1
-
-@flask_app.route('/video')
-def video_route():
-    return Response(generate_mjpeg(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@flask_app.route('/')
-def index_route():
-    return '<html><body style="margin:0;background:black;"><img src="/video" style="width:100vw;height:100vh;object-fit:contain;"></body></html>'
-
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
-
-
-# --- NODE ROS2 ---
 class ArucoLockNode(Node):
     def __init__(self):
         super().__init__('aruco_lock_node')
@@ -97,12 +59,12 @@ class ArucoLockNode(Node):
         self.target_marker_id = self.get_parameter('target_marker_id').value
         self.focal_px = self.get_parameter('camera_focal_px').value
 
-        # Panggil Kamera Real-time Terpisah
         self.cam = RealTimeCamera(camera_source, self.frame_w, self.frame_h)
+        self.bridge = CvBridge()
 
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params = cv2.aruco.DetectorParameters()
-        self.aruco_params.minMarkerPerimeterRate = 0.08  # Abaikan marker yang terlalu jauh/kecil
+        self.aruco_params.minMarkerPerimeterRate = 0.08
         self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
 
         qos_profile = QoSProfile(
@@ -113,23 +75,20 @@ class ArucoLockNode(Node):
 
         self.locked_pub = self.create_publisher(Bool, '/vision/target_locked', qos_profile)
         self.position_pub = self.create_publisher(Point, '/vision/target_position', qos_profile)
+        # Tambahan publisher untuk mengirim gambar mentah ke Laptop via ROS2
+        self.image_pub = self.create_publisher(Image, '/vision/camera_image', qos_profile)
 
         self.locked_id = None
-        
-        # Jalankan pemrosesan secepat mungkin (tanpa timer kaku) untuk performa penuh
         self.create_timer(1.0 / 30.0, self.process_frame)
-        self.get_logger().info('Aruco Lock Node REALTIME siap.')
+        self.get_logger().info('Aruco Lock Node Ringan (Tanpa Flask) Siap.')
 
     def process_frame(self):
-        global output_frame, active_clients
-
         ret, frame = self.cam.read()
         if not ret or frame is None:
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
-
         target_found = False
 
         if ids is not None:
@@ -153,19 +112,20 @@ class ArucoLockNode(Node):
                 pos_msg = Point(x=offset_x, y=distance_m, z=0.0)
                 self.position_pub.publish(pos_msg)
 
-                # Hanya gambar overlay jika ada browser aktif yang menonton (Hemat CPU!)
-                if active_clients > 0:
-                    cv2.polylines(frame, [marker_corners.astype(int)], True, (0, 0, 255), 2)
-                    cv2.circle(frame, (int(center_x), int(center_y)), 4, (0, 0, 255), -1)
+                # Gambar info tracking langsung pada frame mentah
+                cv2.polylines(frame, [marker_corners.astype(int)], True, (0, 0, 255), 2)
+                cv2.circle(frame, (int(center_x), int(center_y)), 4, (0, 0, 255), -1)
+                cv2.putText(frame, f'ID:{self.locked_id} {distance_m:.2f}m', (int(center_x) - 40, int(center_y) - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
         self.locked_pub.publish(Bool(data=target_found))
 
-        # Hanya kompres gambar jika ada browser yang melihat web
-        if active_clients > 0:
-            ret_enc, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-            if ret_enc:
-                with frame_lock:
-                    output_frame = buffer.tobytes()
+        # Kirim frame mentah berkecepatan tinggi ke Laptop melalui ROS2 topic
+        try:
+            img_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            self.image_pub.publish(img_msg)
+        except Exception as e:
+            pass
 
     def destroy_node(self):
         self.cam.release()
@@ -174,7 +134,6 @@ class ArucoLockNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = ArucoLockNode()
-    threading.Thread(target=run_flask, daemon=True).start()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
