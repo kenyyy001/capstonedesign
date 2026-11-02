@@ -1,182 +1,187 @@
 #!/usr/bin/env python3
-import math
-
 import rclpy
 from rclpy.node import Node
-from rclpy.executors import ExternalShutdownException
-from std_msgs.msg import Bool
-from geometry_msgs.msg import Point, Twist
-# REVISI IMPORT: Ganti SensorDataQoS dengan profil manual agar tidak ImportError
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from std_msgs.msg import Bool
+from geometry_msgs.msg import Point
 
-class FollowControllerNode(Node):
+import cv2
+import numpy as np
+import threading
+import time
+
+from flask import Flask, Response
+
+flask_app = Flask(__name__)
+frame_lock = threading.Lock()
+output_frame = None  
+active_clients = 0  # Hitung jumlah browser yang menonton
+
+# --- THREAD KELAS UNTUK MEMBACA KAMERA TANPA BUFFER (REAL-TIME) ---
+class RealTimeCamera:
+    def __init__(self, source, w, h):
+        self.cap = cv2.VideoCapture(source)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        
+        self.ret = False
+        self.frame = None
+        self.running = True
+        
+        self.thread = threading.Thread(target=self._update, daemon=True)
+        self.thread.start()
+
+    def _update(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                self.ret = ret
+                self.frame = frame  # Timpa frame lama secara brutal
+            else:
+                time.sleep(0.01)
+
+    def read(self):
+        return self.ret, self.frame
+
+    def release(self):
+        self.running = False
+        self.cap.release()
+
+def generate_mjpeg():
+    global output_frame, active_clients
+    active_clients += 1
+    try:
+        while True:
+            with frame_lock:
+                if output_frame is None:
+                    time.sleep(0.03)
+                    continue
+                jpeg_bytes = output_frame 
+
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
+            time.sleep(0.04)  # Batasi visual browser di ~25 FPS
+    finally:
+        active_clients -= 1
+
+@flask_app.route('/video')
+def video_route():
+    return Response(generate_mjpeg(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@flask_app.route('/')
+def index_route():
+    return '<html><body style="margin:0;background:black;"><img src="/video" style="width:100vw;height:100vh;object-fit:contain;"></body></html>'
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
+
+
+# --- NODE ROS2 ---
+class ArucoLockNode(Node):
     def __init__(self):
-        super().__init__('follow_controller_node')
+        super().__init__('aruco_lock_node')
 
-        # ---------------- PARAMETER (Tetap Sama) ----------------
-        self.declare_parameter('kp_yaw', 1.0)
-        self.declare_parameter('offset_enter', 0.18)
-        self.declare_parameter('offset_exit', 0.08)
-        self.declare_parameter('offset_smoothing_alpha', 0.3)
-        self.declare_parameter('max_yaw', 0.6)
-        self.declare_parameter('min_yaw_command', 0.22)
+        self.declare_parameter('camera_source', '/dev/video0')
+        self.declare_parameter('frame_width', 320)  
+        self.declare_parameter('frame_height', 240) 
+        self.declare_parameter('marker_size_m', 0.05)
+        self.declare_parameter('target_marker_id', -1)
+        self.declare_parameter('camera_focal_px', 290.0) 
 
-        self.declare_parameter('kp_strafe', 1.0)
-        self.declare_parameter('strafe_deadband', 0.05)
-        self.declare_parameter('max_strafe', 0.30)
-        self.declare_parameter('min_strafe_command', 0.10)
+        camera_source = self.get_parameter('camera_source').value
+        self.frame_w = self.get_parameter('frame_width').value
+        self.frame_h = self.get_parameter('frame_height').value
+        self.marker_size_m = self.get_parameter('marker_size_m').value
+        self.target_marker_id = self.get_parameter('target_marker_id').value
+        self.focal_px = self.get_parameter('camera_focal_px').value
 
-        self.declare_parameter('far_threshold_m', 0.3)
-        self.declare_parameter('near_threshold_m', 0.2)
-        self.declare_parameter('forward_speed', 0.35)
-        self.declare_parameter('backward_speed', 0.30)
-        self.declare_parameter('max_valid_distance_m', 5.0)
+        # Panggil Kamera Real-time Terpisah
+        self.cam = RealTimeCamera(camera_source, self.frame_w, self.frame_h)
 
-        self.declare_parameter('lost_timeout_s', 0.5)
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        self.aruco_params = cv2.aruco.DetectorParameters()
+        self.aruco_params.minMarkerPerimeterRate = 0.08  # Abaikan marker yang terlalu jauh/kecil
+        self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
 
-        self.kp_yaw = self.get_parameter('kp_yaw').value
-        self.offset_enter = self.get_parameter('offset_enter').value
-        self.offset_exit = self.get_parameter('offset_exit').value
-        self.smoothing_alpha = self.get_parameter('offset_smoothing_alpha').value
-        self.max_yaw = self.get_parameter('max_yaw').value
-        self.min_yaw_command = self.get_parameter('min_yaw_command').value
-
-        self.kp_strafe = self.get_parameter('kp_strafe').value
-        self.strafe_deadband = self.get_parameter('strafe_deadband').value
-        self.max_strafe = self.get_parameter('max_strafe').value
-        self.min_strafe_command = self.get_parameter('min_strafe_command').value
-
-        self.far_threshold = self.get_parameter('far_threshold_m').value
-        self.near_threshold = self.get_parameter('near_threshold_m').value
-        self.forward_speed = self.get_parameter('forward_speed').value
-        self.backward_speed = self.get_parameter('backward_speed').value
-        self.max_valid_distance = self.get_parameter('max_valid_distance_m').value
-
-        self.lost_timeout = self.get_parameter('lost_timeout_s').value
-
-        self.target_locked = False
-        self.position = None
-        self.last_position_time = None
-        self.last_state = None
-
-        self.filtered_offset = 0.0
-        self.is_turning = False
-        self.distance_state = 'STOP'
-
-        # REVISI QOS: Buat profil Best Effort manual (identik dengan SensorDataQoS)
         qos_profile = QoSProfile(
-            depth=1,  # Set ke 1 agar antrean frame lama langsung dibuang
+            depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE
         )
 
-        # Gunakan qos_profile baru ini pada subscription
-        self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, qos_profile)
-        self.create_subscription(Point, '/vision/target_position', self.position_callback, qos_profile)
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.locked_pub = self.create_publisher(Bool, '/vision/target_locked', qos_profile)
+        self.position_pub = self.create_publisher(Point, '/vision/target_position', qos_profile)
 
-        self.create_timer(1.0 / 20.0, self.control_loop)
+        self.locked_id = None
+        
+        # Jalankan pemrosesan secepat mungkin (tanpa timer kaku) untuk performa penuh
+        self.create_timer(1.0 / 30.0, self.process_frame)
+        self.get_logger().info('Aruco Lock Node REALTIME siap.')
 
-        self.get_logger().info(
-            f'Follow controller v3 (holonomic strafe) siap. Zona jarak: maju>{self.far_threshold}m, '
-            f'mundur<{self.near_threshold}m')
+    def process_frame(self):
+        global output_frame, active_clients
 
-    # ... Sisa fungsi ke bawah (callback, compute, main) tetap sama persis dengan kode Anda ...
-    def locked_callback(self, msg):
-        self.target_locked = msg.data
+        ret, frame = self.cam.read()
+        if not ret or frame is None:
+            return
 
-    def position_callback(self, msg):
-        self.position = msg
-        self.last_position_time = self.get_clock().now()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = self.detector.detectMarkers(gray)
 
-    def position_is_fresh(self):
-        if self.last_position_time is None:
-            return False
-        age = (self.get_clock().now() - self.last_position_time).nanoseconds * 1e-9
-        return age < self.lost_timeout
+        target_found = False
 
-    def compute_yaw(self, filtered_offset):
-        magnitude = abs(filtered_offset)
-        if self.is_turning:
-            if magnitude < self.offset_exit:
-                self.is_turning = False
-        else:
-            if magnitude > self.offset_enter:
-                self.is_turning = True
+        if ids is not None:
+            ids_flat = ids.flatten()
+            if self.locked_id is None:
+                self.locked_id = self.target_marker_id if self.target_marker_id != -1 else int(ids_flat[0])
 
-        if not self.is_turning:
-            return 0.0
+            if self.locked_id in ids_flat:
+                idx = list(ids_flat).index(self.locked_id)
+                marker_corners = corners[idx][0]
+                target_found = True
 
-        value = -self.kp_yaw * filtered_offset
-        value = max(-self.max_yaw, min(self.max_yaw, value))
-        if abs(value) < self.min_yaw_command:
-            value = math.copysign(self.min_yaw_command, value)
-        return value
+                center_x = float(np.mean(marker_corners[:, 0]))
+                center_y = float(np.mean(marker_corners[:, 1]))
+                offset_x = (center_x - (self.frame_w / 2.0)) / (self.frame_w / 2.0)
 
-    def compute_strafe(self, filtered_offset):
-        if abs(filtered_offset) <= self.strafe_deadband:
-            return 0.0
-        e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
-        value = self.kp_strafe * e
-        value = max(-self.max_strafe, min(self.max_strafe, value))
-        if abs(value) < self.min_strafe_command:
-            value = math.copysign(self.min_strafe_command, value)
-        return value
+                side_lengths = [np.linalg.norm(marker_corners[i] - marker_corners[(i + 1) % 4]) for i in range(4)]
+                avg_side_px = float(np.mean(side_lengths))
+                distance_m = (self.marker_size_m * self.focal_px) / avg_side_px if avg_side_px > 0 else 0.0
 
-    def compute_forward(self, distance):
-        if distance > self.far_threshold:
-            self.distance_state = 'FORWARD'
-        elif distance < self.near_threshold:
-            self.distance_state = 'BACKWARD'
-        else:
-            if self.distance_state != 'BACKWARD':
-                self.distance_state = 'STOP'
+                pos_msg = Point(x=offset_x, y=distance_m, z=0.0)
+                self.position_pub.publish(pos_msg)
 
-        if self.distance_state == 'FORWARD':
-            return self.forward_speed
-        elif self.distance_state == 'BACKWARD':
-            return -self.backward_speed
-        return 0.0
+                # Hanya gambar overlay jika ada browser aktif yang menonton (Hemat CPU!)
+                if active_clients > 0:
+                    cv2.polylines(frame, [marker_corners.astype(int)], True, (0, 0, 255), 2)
+                    cv2.circle(frame, (int(center_x), int(center_y)), 4, (0, 0, 255), -1)
 
-    def control_loop(self):
-        cmd = Twist()
-        state = 'HILANG'
+        self.locked_pub.publish(Bool(data=target_found))
 
-        if self.target_locked and self.position is not None and self.position_is_fresh():
-            offset_raw = self.position.x
-            distance = self.position.y
+        # Hanya kompres gambar jika ada browser yang melihat web
+        if active_clients > 0:
+            ret_enc, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            if ret_enc:
+                with frame_lock:
+                    output_frame = buffer.tobytes()
 
-            a = self.smoothing_alpha
-            self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
-
-            if 0.0 < distance <= self.max_valid_distance:
-                cmd.linear.x = self.compute_forward(distance)
-                cmd.linear.y = self.compute_strafe(self.filtered_offset)
-                cmd.angular.z = self.compute_yaw(self.filtered_offset)
-                state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
-                         f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
-        else:
-            self.distance_state = 'STOP'
-            self.is_turning = False
-            self.filtered_offset = 0.0
-
-        self.cmd_pub.publish(cmd)
-
-        if state != self.last_state:
-            self.get_logger().info(f'Status: {state}')
-            self.last_state = state
+    def destroy_node(self):
+        self.cam.release()
+        super().destroy_node()
 
 def main(args=None):
     rclpy.init(args=args)
-    node = FollowControllerNode()
+    node = ArucoLockNode()
+    threading.Thread(target=run_flask, daemon=True).start()
     try:
         rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
+    except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
