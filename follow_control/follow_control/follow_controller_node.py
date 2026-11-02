@@ -6,7 +6,7 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Point, Twist
-
+from rclpy.qos import SensorDataQoS
 
 class FollowControllerNode(Node):
     def __init__(self):
@@ -64,8 +64,8 @@ class FollowControllerNode(Node):
         self.is_turning = False
         self.distance_state = 'STOP'
 
-        self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, 10)
-        self.create_subscription(Point, '/vision/target_position', self.position_callback, 10)
+        self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, SensorDataQoS())
+        self.create_subscription(Point, '/vision/target_position', self.position_callback, SensorDataQoS())
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.create_timer(1.0 / 20.0, self.control_loop)
