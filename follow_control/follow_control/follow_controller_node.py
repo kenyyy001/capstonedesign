@@ -104,10 +104,6 @@ class FollowControllerNode(Node):
 
         value = -self.kp_yaw * filtered_offset
         value = max(-self.max_yaw, min(self.max_yaw, value))
-
-        if abs(value) < self.min_yaw_command:
-            value = math.copysign(self.min_yaw_command, value)
-
         return value
 
     def compute_strafe(self, filtered_offset):
