@@ -116,10 +116,6 @@ class FollowControllerNode(Node):
         e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
         value = self.kp_strafe * e
         value = max(-self.max_strafe, min(self.max_strafe, value))
-
-        if abs(value) < self.min_strafe_command:
-            value = math.copysign(self.min_strafe_command, value)
-            
         return value
 
     def compute_forward(self, distance):
