@@ -66,6 +66,16 @@ def video_route():
     return Response(generate_mjpeg(),
                      mimetype='multipart/x-mixed-replace; boundary=frame')
 
+@flask_app.route('/snapshot')
+def snapshot_route():
+    with stream_cond:
+        data = latest_jpeg
+    if data is None:
+        return Response(status=503)
+    resp = Response(data, mimetype='image/jpeg')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
 
 @flask_app.route('/')
 def index_route():
