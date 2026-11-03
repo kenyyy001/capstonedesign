@@ -45,9 +45,9 @@ def encoder_loop():
                     latest_jpeg = buf.tobytes()
                     latest_seq += 1
                     stream_cond.notify_all()
-            dt = time.time() - t0
-            if dt < period:
-                time.sleep(period - dt)
+        dt = time.time() - t0
+        if dt < period:
+            time.sleep(period - dt)
 
 def generate_mjpeg():
     last = -1
@@ -61,6 +61,7 @@ def generate_mjpeg():
 
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
 
+@flask_app.route('/video')
 def video_route():
     return Response(generate_mjpeg(),
                      mimetype='multipart/x-mixed-replace; boundary=frame')
@@ -190,10 +191,7 @@ class ArucoLockNode(Node):
         if now - self._t_log >= 2.0:
             self.get_logger().info(
                 f'FPS proses={self._n / (now - self._t_log):.1f} | deteksi={1000 * self._acc / self._n:.1f} ms')
-        self._t_log, self._n, self._acc = now, 0, 0.0
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = self.detector.detectMarkers(gray)
+            self._t_log, self._n, self._acc = now, 0, 0.0
 
         target_found = False
 

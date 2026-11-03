@@ -204,10 +204,9 @@ bool  remoteMode = false;
 unsigned long lastRemoteCmd = 0;
 const unsigned long REMOTE_TIMEOUT_MS = 500;
 
-const float KEY_LIN = 0.35f;
-const float KEY_ROT = 0.5f;
+#define ENABLE_KEYBOARD_DEBUG 0
 
-void stopRobot() {                       
+void stopRobot() {
     cmdX = cmdY = cmdW = 0.0f;
     cmdScale = 1.0f;
     for (int i = 0; i < 3; i++) {
@@ -219,85 +218,83 @@ void stopRobot() {
     remoteMode = false;
 }
 
-void setCmd(float x, float y, float w) {
-    cmdX = x; cmdY = y; cmdW = w; cmdScale = 1.0f;
-    remoteMode = false;
-}
-
-void keyboardCommand(char c) {
-    const float L = KEY_LIN, D = KEY_LIN * 0.7071f, R = KEY_ROT;
-    switch (c) {
-        case 'w': setCmd(0,  L, 0); break;
-        case 's': setCmd(0, -L, 0); break;
-        case 'q': setCmd( L, 0, 0); break;
-        case 'e': setCmd(-L, 0, 0); break;
-        case 'r': setCmd( D,  D, 0); break;
-        case 't': setCmd(-D,  D, 0); break;
-        case 'f': setCmd( D, -D, 0); break;
-        case 'g': setCmd(-D, -D, 0); break;
-        case 'a': setCmd(0, 0,  R); break;
-        case 'd': setCmd(0, 0, -R); break;
-        case 'x': stopRobot(); break;
-        default: return;
-    }
-    Serial.printf(">>> %c\n", c);
-}
-
 void handleV(float vx, float vy, float w, float s) {
     s = constrain(s, 0.0f, 1.0f);
-    bool zero = (fabsf(vx) < 1e-4f && fabsf(vy) < 1e-4f && fabsf(w) < 1e-4f) || s < 0.01f;
+    bool zero = (fabsf(vx) < 1e-4f && fabsf(vy) < 1e-4f && fabsf(w) < 1e-4f) || s <0.01f;
     if (zero) {
         cmdX = cmdY = cmdW = 0.0f;
         cmdScale = 1.0f;
     } else {
         cmdX = VX_SIGN * vx;
         cmdY = VY_SIGN * vy;
-        cmdW = W_SIGN  * w;
+        cmdW = W_SIGN * w;
         cmdScale = s;
     }
     remoteMode = true;
     lastRemoteCmd = millis();
 }
+#if ENABLE_KEYBOARD_DEBUG
+void setCmd(float x, float y, float w) {
+    cmdX = x; cmdY = y; cmdW = w; cmdScale = 1.0f;
+    remoteMode = false;
+}
+void keyboardCommand(char c) {
+    const float L = 0.35f, R = 0.5f;
+    switch (c) {
+        case 'w': setCmd(0,  L, 0); break;
+        case 's': setCmd(0, -L, 0); break;
+        case 'q': setCmd( L, 0, 0); break;
+        case 'e': setCmd(-L, 0, 0); break;
+        case 'a': setCmd(0, 0,  R); break;
+        case 'd': setCmd(0, 0, -R); break;
+        case 'x': stopRobot(); break;
+    }
+}
+#endif
 
 char rxBuf[64];
 uint8_t rxLen = 0;
-unsigned long rxLast = 0;
+bool rxActive = false;
 
 void flushMessage() {
-    if (rxLen == 0) return;
-    rxBuf[rxLen] = 0;
-    float v[4];
-    int n = 0;
-    char *p = rxBuf + 1;                 
-    while (n < 4) {
-        while (*p == ' ' || *p == ',' || *p == '\t') p++;
-        if (!*p) break;
-        char *end;
-        float val = strtof(p, &end);
-        if (end == p) break;
-        v[n++] = val;
-        p = end;
+    if (rxActive && rxLen > 1) {
+        rxBuf[rxLen] = 0;
+        float v[4];
+        int n = 0;
+        char *p = rxBuf + 1;                  // lewati 'V'
+        while (n < 4) {
+            while (*p == ' ' || *p == ',' || *p == '\t') p++;
+            if (!*p) break;
+            char *end;
+            float val = strtof(p, &end);
+            if (end == p || !isfinite(val)) { n = -1; break; }
+            v[n++] = val;
+            p = end;
+        }
+        if (n == 4) handleV(v[0], v[1], v[2], v[3]);
     }
-    if (n == 4) handleV(v[0], v[1], v[2], v[3]);
     rxLen = 0;
+    rxActive = false;
 }
 
 void readSerial() {
     while (Serial.available()) {
         char ch = Serial.read();
-        rxLast = millis();
         if (ch == '\n' || ch == '\r') { flushMessage(); continue; }
 
-        if (ch == 'v' || ch == 'V') {            
-            flushMessage();
-            rxBuf[rxLen++] = 'v';
-        } else if (rxLen > 0) {                  
+        if (ch == 'V' || ch == 'v') {        
+            rxLen = 0;
+            rxActive = true;
+            rxBuf[rxLen++] = 'V';
+        } else if (rxActive) {
             if (rxLen < sizeof(rxBuf) - 1) rxBuf[rxLen++] = ch;
-        } else if (isalpha((unsigned char)ch)) {
-            keyboardCommand(tolower(ch));
+            else { rxLen = 0; rxActive = false; }   // overflow -> buang
         }
+#if ENABLE_KEYBOARD_DEBUG
+        else if (isalpha((unsigned char)ch)) keyboardCommand(tolower(ch));
+#endif
+        // selain itu: abaikan
     }
-    if (rxLen > 0 && millis() - rxLast > 10) flushMessage();
 }
 
 void controlStep(float dt) {
