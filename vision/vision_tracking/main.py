@@ -24,7 +24,7 @@ latest_seq = 0
 
 STREAM_FPS = 12
 STREAM_W, STREAM_H = 480, 360
-JPEG_QUALITY = 55
+JPEG_QUALITY = 35
 
 def encoder_loop():
     global latest_jpeg, latest_seq
@@ -80,7 +80,19 @@ def index_route():
             img { display: block; width: 100vw; height: 100vh; object-fit: contain; }
         </style>
     </head>
-    <body><img src="/video"></body>
+    <body>
+        <img id="feed" src="/snapshot">
+        <script>
+            const img = document.getElementById('feed');
+            function refresh() {
+                const next = new Image();
+                next.onload = () => { img.src = next.src; refresh(); };
+                next.onerror = () => { setTimeout(refresh, 200); };
+                next.src = '/snapshot?t=' + Date.now();
+            }
+            refresh();
+        </script>
+    </body>
     </html>
     '''
 
