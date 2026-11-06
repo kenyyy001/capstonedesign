@@ -56,6 +56,8 @@ class FollowControllerNode(Node):
         self.max_valid_distance = self.get_parameter('max_valid_distance_m').value
 
         self.lost_timeout = self.get_parameter('lost_timeout_s').value
+        self.enable_yaw = self.get_parameter('enable_yaw').value
+        self.lost_hold_s = self.get_parameter('lost_hold_s').value
 
         self.target_locked = False
         self.position = None
@@ -157,7 +159,7 @@ class FollowControllerNode(Node):
                 cmd.angular.z = (self.compute_yaw(self.filtered_offset)
                                  if self.enable_yaw else 0.0)
 
-                self.last_cmd_values = (cmd.linear.x, cmd.linear.y, cmd.linear.z)
+                self.last_cmd_values = (cmd.linear.x, cmd.linear.y, cmd.angular.z)
                 self.last_tracking_time = now
                 tracking = True
                 state = f'MENGIKUTI (jarak_state={self.distance_state})'
