@@ -38,7 +38,7 @@ class SerialBridgeNode(Node):
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('linear_scale', 0.5)    # satuan firmware untuk translasi penuh (sama dengan tombol W = 0.5)
         self.declare_parameter('angular_scale', 1.0)   # satuan firmware untuk putar penuh (perlu tuning)
-        self.declare_parameter('lateral_sign', 1.0)   # ROS y = kiri, firmware x = kanan (BELUM diverifikasi fisik)
+        self.declare_parameter('lateral_sign', -1.0)   # ROS y = kiri, firmware x = kanan (BELUM diverifikasi fisik)
         self.declare_parameter('yaw_sign', 1.0)        # ubah ke -1.0 kalau arah putar terbalik
         self.declare_parameter('cmd_timeout_s', 0.5)
         self.declare_parameter('send_rate_hz', 20.0)
