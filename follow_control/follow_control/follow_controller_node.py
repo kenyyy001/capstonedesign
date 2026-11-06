@@ -34,6 +34,8 @@ class FollowControllerNode(Node):
         self.declare_parameter('max_valid_distance_m', 5.0)
 
         self.declare_parameter('lost_timeout_s', 0.5)
+        self.declare_parameter('enable_yaw', False)
+        self.declare_parameter('lost_hold_s', 2.0)
 
         self.kp_yaw = self.get_parameter('kp_yaw').value
         self.offset_enter = self.get_parameter('offset_enter').value
@@ -63,6 +65,9 @@ class FollowControllerNode(Node):
         self.filtered_offset = 0.0
         self.is_turning = False
         self.distance_state = 'STOP'
+
+        self.last_cmd_values = (0.0, 0.0, 0.0)
+        self.last_tracking_time = None
 
         self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, 10)
         self.create_subscription(Point, '/vision/target_position', self.position_callback, 10)
@@ -135,22 +140,37 @@ class FollowControllerNode(Node):
 
     def control_loop(self):
         cmd = Twist()
+        now = self.get_clock().now()
+        tracking = False
         state = 'HILANG'
 
         if self.target_locked and self.position is not None and self.position_is_fresh():
             offset_raw = self.position.x
             distance = self.position.y
 
-            a = self.smoothing_alpha
-            self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
-
             if 0.0 < distance <= self.max_valid_distance:
+                a = self.smoothing_alpha
+                self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
+
                 cmd.linear.x = self.compute_forward(distance)
                 cmd.linear.y = self.compute_strafe(self.filtered_offset)
-                cmd.angular.z = self.compute_yaw(self.filtered_offset)
-                state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
-                         f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
-        else:
+                cmd.angular.z = (self.compute_yaw(self.filtered_offset)
+                                 if self.enable_yaw else 0.0)
+
+                self.last_cmd_values = (cmd.linear.x, cmd.linear.y, cmd.linear.z)
+                self.last_tracking_time = now
+                tracking = True
+                state = f'MENGIKUTI (jarak_state={self.distance_state})'
+
+        if not tracking and self.last_tracking_time is not None:
+            lost_for = (now - self.last_tracking_time).nanoseconds * 1e-9
+            if lost_for < self.lost_hold_s:
+                cmd.linear.x, cmd.linear.y, cmd.angular.z = self.last_cmd_values # gak lurus
+                state = 'MARKER HILANG - menahan gerak terakhir'
+            else:
+                self.last_tracking_time = None
+
+        if state == 'HILANG':
             self.distance_state = 'STOP'
             self.is_turning = False
             self.filtered_offset = 0.0
