@@ -56,6 +56,7 @@ class FollowControllerNode(Node):
         self.max_valid_distance = self.get_parameter('max_valid_distance_m').value
 
         self.lost_timeout = self.get_parameter('lost_timeout_s').value
+        
         self.enable_yaw = self.get_parameter('enable_yaw').value
         self.lost_hold_s = self.get_parameter('lost_hold_s').value
 
@@ -167,7 +168,7 @@ class FollowControllerNode(Node):
         if not tracking and self.last_tracking_time is not None:
             lost_for = (now - self.last_tracking_time).nanoseconds * 1e-9
             if lost_for < self.lost_hold_s:
-                cmd.linear.x, cmd.linear.y, cmd.angular.z = self.last_cmd_values # gak lurus
+                cmd.linear.x = self.last_cmd_values # gak lurus
                 state = 'MARKER HILANG - menahan gerak terakhir'
             else:
                 self.last_tracking_time = None
