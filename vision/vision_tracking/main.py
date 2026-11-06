@@ -24,7 +24,7 @@ latest_seq = 0
 
 STREAM_FPS = 12
 STREAM_W, STREAM_H = 480, 360
-JPEG_QUALITY = 35
+JPEG_QUALITY = 50
 
 def encoder_loop():
     global latest_jpeg, latest_seq
@@ -94,10 +94,14 @@ def index_route():
         <img id="feed" src="/snapshot">
         <script>
             const img = document.getElementById('feed');
+            const POLL_INTERVAL_MS = 50;   // sedikit di atas periode STREAM_FPS server (1000/20 = 50ms)
             function refresh() {
                 const next = new Image();
-                next.onload = () => { img.src = next.src; refresh(); };
-                next.onerror = () => { setTimeout(refresh, 200); };
+                next.onload = () => {
+                    img.src = next.src;
+                    setTimeout(refresh, POLL_INTERVAL_MS);
+                };
+                next.onerror = () => setTimeout(refresh, 300);
                 next.src = '/snapshot?t=' + Date.now();
             }
             refresh();
@@ -105,7 +109,6 @@ def index_route():
     </body>
     </html>
     '''
-
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=5000, threaded=True, use_reloader=False)
