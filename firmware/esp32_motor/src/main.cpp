@@ -298,8 +298,18 @@ void readSerial() {
 }
 
 void controlStep(float dt) {
-    float w = cmdW;   // murni dari ROS2 (saat ini selalu 0 karena enable_yaw=False di controller)
-    headingLocked = false;   // heading-lock BNO055 dinonaktifkan - konflik dengan lateral tracking
+    float w = cmdW;
+    bool translating = (fabsf(cmdX) + fabsf(cmdY)) > 0.02f;
+    if (bnoReady && translating && fabsf(cmdW) < 0.01f) {
+        if (!headingLocked) {
+            headingTarget = currentYaw;
+            headingLocked = true;
+            resetPID(headingPID);
+        }
+        w = HEADING_SIGN * updateHeadingPID(angleDiffDeg(headingTarget, currentYaw), dt);
+    } else {
+        headingLocked = false;
+    }
 
     inverseKinematics(cmdX, cmdY, w, cmdScale, goalWheel);
 
@@ -308,6 +318,7 @@ void controlStep(float dt) {
         updateWheel(i, dt);
     }
 }
+
 void setup() {
     Serial.begin(115200);
 
