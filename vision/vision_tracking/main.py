@@ -22,7 +22,7 @@ stream_cond = threading.Condition()
 latest_jpeg = None
 latest_seq = 0
 
-STREAM_FPS = 12
+STREAM_FPS = 20
 STREAM_W, STREAM_H = 480, 360
 JPEG_QUALITY = 50
 
