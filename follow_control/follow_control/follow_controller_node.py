@@ -145,8 +145,6 @@ class FollowControllerNode(Node):
 
             if 0.0 < distance <= self.max_valid_distance:
 
-
-
                 cmd.linear.x = self.compute_forward(distance)
                 cmd.linear.y = self.compute_strafe(self.filtered_offset)
                 cmd.angular.z = self.compute_yaw(self.filtered_offset)
