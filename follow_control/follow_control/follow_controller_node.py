@@ -33,6 +33,21 @@ class FollowControllerNode(Node):
 
         self.declare_parameter('lost_timeout_s', 0.5)
 
+        # declare (bersama declare lainnya)
+        self.declare_parameter('lost_hold_s', 2.0)     # lama meneruskan perintah terakhir
+        self.declare_parameter('lost_taper_s', 1.0)    # bagian akhir hold yang diturunkan linear ke 0
+        self.declare_parameter('enable_yaw', False)    # False = hanya strafe, tanpa rotasi
+
+        # get (bersama get lainnya)
+        self.lost_hold = self.get_parameter('lost_hold_s').value
+        self.lost_taper = self.get_parameter('lost_taper_s').value
+        self.enable_yaw = self.get_parameter('enable_yaw').value
+
+        # state (bersama state lainnya)
+        self.last_cmd = (0.0, 0.0, 0.0)
+        self.last_seen = None
+        self.filter_ready = False
+
         self.kp_yaw = self.get_parameter('kp_yaw').value
         self.offset_enter = self.get_parameter('offset_enter').value
         self.offset_exit = self.get_parameter('offset_exit').value
@@ -105,15 +120,14 @@ class FollowControllerNode(Node):
         return value
 
     def compute_strafe(self, filtered_offset):
-        """Gerak menyilang sebanding offset marker dari tengah frame.
-        Dihitung dari offset yang SAMA dengan compute_yaw, di tick yang sama,
-        sehingga robot langsung memotong miring sambil badan pelan-pelan lurus."""
         if abs(filtered_offset) <= self.strafe_deadband:
             return 0.0
 
         e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
         value = self.kp_strafe * e
         value = max(-self.max_strafe, min(self.max_strafe, value))
+        if abs(value) < self.min_strafe_command:
+            value = math.copysign(self.min_strafe_command, value)
         return value
 
     def compute_forward(self, distance):
@@ -131,35 +145,62 @@ class FollowControllerNode(Node):
             return -self.backward_speed
         return 0.0
 
+    def reset_tracking(self):
+        self.distance_state = 'STOP'
+        self.is_turning = False
+        self.filtered_offset = 0.0
+        self.filter_ready = False
+        self.last_cmd = (0.0, 0.0, 0.0)
+        self.last_seen = None
+
     def control_loop(self):
         cmd = Twist()
         state = 'HILANG'
+        now = self.get_clock().now()
 
         if self.target_locked and self.position is not None and self.position_is_fresh():
             offset_raw = self.position.x
             distance = self.position.y
 
-            a = self.smoothing_alpha
-            self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
+            # inisialisasi filter dengan sampel pertama, supaya tidak "loncat dari 0"
+            if not self.filter_ready:
+                self.filtered_offset = offset_raw
+                self.filter_ready = True
+            else:
+                a = self.smoothing_alpha
+                self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
 
             if 0.0 < distance <= self.max_valid_distance:
-
                 cmd.linear.x = self.compute_forward(distance)
                 cmd.linear.y = self.compute_strafe(self.filtered_offset)
-                cmd.angular.z = self.compute_yaw(self.filtered_offset)
+                cmd.angular.z = (self.compute_yaw(self.filtered_offset)
+                                if self.enable_yaw else 0.0)
+
+                self.last_cmd = (cmd.linear.x, cmd.linear.y, cmd.angular.z)
+                self.last_seen = now   # <- setiap deteksi valid membatalkan masa hold
                 state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
-                         f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
+                        f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
+
+        elif self.last_seen is not None:
+            age = (now - self.last_seen).nanoseconds * 1e-9
+            if age < self.lost_hold:
+                taper = min(self.lost_taper, self.lost_hold)
+                full_until = self.lost_hold - taper
+                f = 1.0 if age <= full_until else (self.lost_hold - age) / taper
+                cmd.linear.x = self.last_cmd[0] * f
+                cmd.linear.y = self.last_cmd[1] * f
+                cmd.angular.z = self.last_cmd[2] * f
+                state = 'HOLD (marker hilang sesaat)'
+            else:
+                self.reset_tracking()   # masa hold habis -> berhenti & reset total
         else:
-            self.distance_state = 'STOP'
-            self.is_turning = False
-            self.filtered_offset = 0.0
+            self.reset_tracking()
 
         self.cmd_pub.publish(cmd)
 
         if state != self.last_state:
             self.get_logger().info(f'Status: {state}')
             self.last_state = state
-
 def main(args=None):
     rclpy.init(args=args)
     node = FollowControllerNode()
