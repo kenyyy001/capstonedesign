@@ -22,9 +22,10 @@ stream_cond = threading.Condition()
 latest_jpeg = None
 latest_seq = 0
 
-STREAM_FPS = 20
-STREAM_W, STREAM_H = 480, 360
-JPEG_QUALITY = 50
+STREAM_FPS = 15
+STREAM_W, STREAM_H = 640, 480
+JPEG_QUALITY = 80
+STREAM_SHARPEN = True
 
 def encoder_loop():
     global latest_jpeg, latest_seq
@@ -37,7 +38,12 @@ def encoder_loop():
             seq = frame_seq
         if frame is not None and seq != last_seq:
             last_seq = seq
-            small = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
+            small = frame
+            if frame.shape[1] != STREAM_W or frame.shape[0] != STREAM_H:
+                small = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
+            if STREAM_SHARPEN:
+                soft = cv2.GaussianBlur(small, (0, 0), 1.0)
+                small = cv2.addWeighted(small, 1.4, soft, -0.4, 0)   # penajaman ringan, hanya untuk tampilan
             ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
 
             if ok:
@@ -94,7 +100,7 @@ def index_route():
         <img id="feed" src="/snapshot">
         <script>
             const img = document.getElementById('feed');
-            const POLL_INTERVAL_MS = 50;   // sedikit di atas periode STREAM_FPS server (1000/20 = 50ms)
+            const POLL_INTERVAL_MS = 50;   // sedikit di atas periode STREAM_FPS server (1000/15 = 66ms)
             function refresh() {
                 const next = new Image();
                 next.onload = () => {
@@ -168,7 +174,8 @@ class ArucoLockNode(Node):
         self.declare_parameter('marker_size_m', 0.05)
         self.declare_parameter('target_marker_id', -1)
         self.declare_parameter('camera_focal_px', 600.0)
-
+        self.declare_parameter('camera_fourcc', 'YUYV')
+        
         camera_source = self.get_parameter('camera_source').value
         self.frame_w = self.get_parameter('frame_width').value
         self.frame_h = self.get_parameter('frame_height').value
@@ -176,7 +183,9 @@ class ArucoLockNode(Node):
         self.target_marker_id = self.get_parameter('target_marker_id').value
         self.focal_px = self.get_parameter('camera_focal_px').value
 
-        self.grabber = LatestFrameCapture(camera_source, self.frame_w, self.frame_h, 30)
+        self.camera_fourcc = self.get_parameter('camera_fourcc').value
+        self.grabber = LatestFrameCapture(camera_source, self.frame_w, self.frame_h, 30,
+                                          fourcc=self.camera_fourcc)
         self.get_logger().info(f'Kamera aktif: {self.grabber.info}')
         if not self.grabber.isOpened():
             self.get_logger().error(f'Kamera {camera_source} tidak bisa dibuka!')
@@ -308,11 +317,12 @@ def main(args=None):
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
