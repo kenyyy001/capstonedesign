@@ -25,7 +25,9 @@ class FollowControllerNode(Node):
         self.declare_parameter('kp_strafe', 1.0)
         self.declare_parameter('strafe_deadband', 0.05)   # mati dekat tengah
         self.declare_parameter('max_strafe', 0.30)
-        self.declare_parameter('min_strafe_command', 0.10)
+        self.declare_parameter('strafe_enter', 0.10)   # mulai geser kalau |offset| lebih dari ini
+        self.declare_parameter('strafe_exit', 0.04)    # berhenti geser kalau |offset| kurang dari ini
+        self.declare_parameter('min_strafe_command', 0.18)   # GANTI dari 0.10
 
         # ---------------- JARAK (3 zona) ----------------
         self.declare_parameter('far_threshold_m', 0.3)
@@ -48,6 +50,9 @@ class FollowControllerNode(Node):
         self.max_strafe = self.get_parameter('max_strafe').value
         self.min_strafe_command = self.get_parameter('min_strafe_command').value
 
+        self.strafe_enter = self.get_parameter('strafe_enter').value
+        self.strafe_exit = self.get_parameter('strafe_exit').value
+
         self.far_threshold = self.get_parameter('far_threshold_m').value
         self.near_threshold = self.get_parameter('near_threshold_m').value
         self.forward_speed = self.get_parameter('forward_speed').value
@@ -62,6 +67,8 @@ class FollowControllerNode(Node):
         self.position = None
         self.last_position_time = None
         self.last_state = None
+
+        self.is_strafing = False
 
         self.filtered_offset = 0.0
         self.is_turning = False
@@ -110,16 +117,22 @@ class FollowControllerNode(Node):
         return value
 
     def compute_strafe(self, filtered_offset):
-        """Gerak menyilang sebanding offset marker dari tengah frame.
-        Dihitung dari offset yang SAMA dengan compute_yaw, di tick yang sama,
-        sehingga robot langsung memotong miring sambil badan pelan-pelan lurus."""
-        if abs(filtered_offset) <= self.strafe_deadband:
+        magnitude = abs(filtered_offset)
+
+        # histeresis: mulai geser kalau > strafe_enter, berhenti kalau < strafe_exit
+        if self.is_strafing:
+            if magnitude < self.strafe_exit:
+                self.is_strafing = False
+        else:
+            if magnitude > self.strafe_enter:
+                self.is_strafing = True
+
+        if not self.is_strafing:
             return 0.0
 
-        e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
-        value = self.kp_strafe * e
-        value = max(-self.max_strafe, min(self.max_strafe, value))
-        return value
+        value = self.kp_strafe * magnitude
+        value = max(self.min_strafe_command, min(self.max_strafe, value))
+        return math.copysign(value, filtered_offset)
 
     def compute_forward(self, distance):
         if distance > self.far_threshold:
@@ -141,6 +154,7 @@ class FollowControllerNode(Node):
     def control_loop(self):
         cmd = Twist()
         state = 'HILANG'
+        self.is_strafing = False
 
         if self.target_locked and self.position is not None and self.position_is_fresh():
             offset_raw = self.position.x
