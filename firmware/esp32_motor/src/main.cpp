@@ -74,7 +74,7 @@ const float matrix_kecepatan[9] = {
 };
 
 const float MAX_WHEEL_SPEED = 5.0f;
-const int PWM_AT_MAX_SPEED = 80;
+const int PWM_AT_MAX_SPEED = 120;
 
 const float LIN_CMD_FULL = 0.35f;
 const float GAIN_LIN = MAX_WHEEL_SPEED / (0.5774f * LIN_CMD_FULL);
