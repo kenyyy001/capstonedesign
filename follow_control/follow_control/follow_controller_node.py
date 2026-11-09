@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
 import math
+
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
@@ -53,8 +53,6 @@ class FollowControllerNode(Node):
         self.max_valid_distance = self.get_parameter('max_valid_distance_m').value
 
         self.lost_timeout = self.get_parameter('lost_timeout_s').value
-        self.enable_yaw = self.get_parameter('enable_yaw').value
-        self.lost_hold_s = self.get_parameter('lost_hold_s').value
 
         self.target_locked = False
         self.position = None
@@ -126,13 +124,13 @@ class FollowControllerNode(Node):
             self.distance_state = 'BACKWARD'
         else:
             if self.distance_state != 'BACKWARD':
-                self.distance_state = 'HOLD'   # bukan 'STOP' lagi
+                self.distance_state = 'STOP'
 
         if self.distance_state == 'FORWARD':
             return self.forward_speed
         elif self.distance_state == 'BACKWARD':
-            return -self.backward_speed 
-        return 0.0  
+            return -self.backward_speed
+        return 0.0
 
     def control_loop(self):
         cmd = Twist()
@@ -146,6 +144,9 @@ class FollowControllerNode(Node):
             self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
 
             if 0.0 < distance <= self.max_valid_distance:
+
+
+
                 cmd.linear.x = self.compute_forward(distance)
                 cmd.linear.y = self.compute_strafe(self.filtered_offset)
                 cmd.angular.z = self.compute_yaw(self.filtered_offset)
@@ -155,21 +156,24 @@ class FollowControllerNode(Node):
             self.distance_state = 'STOP'
             self.is_turning = False
             self.filtered_offset = 0.0
-            
 
+        self.cmd_pub.publish(cmd)
+
+        if state != self.last_state:
+            self.get_logger().info(f'Status: {state}')
+            self.last_state = state
 
 def main(args=None):
     rclpy.init(args=args)
     node = FollowControllerNode()
     try:
         rclpy.spin(node)
-    except (KeyboardInterrupt):
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
-
-if __name__ == '__main__':
-    main()
+    if __name__ == '__main__':
+        main()
