@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import math
-from turtle import distance
-
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
@@ -133,10 +131,8 @@ class FollowControllerNode(Node):
         if self.distance_state == 'FORWARD':
             return self.forward_speed
         elif self.distance_state == 'BACKWARD':
-            return -self.backward_speed
-        elif self.distance_state == 'HOLD':
-            return self.forward_speed * 0.15   # creep halus, bukan nol, supaya tidak terasa "berhenti"
-        return 0.0
+            return -self.backward_speed 
+        return 0.0  
 
     def control_loop(self):
         cmd = Twist()
