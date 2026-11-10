@@ -1,25 +1,3 @@
-#!/usr/bin/env python3
-"""
-Serial Bridge Node
-==================
-Jembatan antara ROS2 dan firmware ESP32.
-
-Subscribe:
-  /cmd_vel (geometry_msgs/Twist), nilai ternormalisasi -1.0 .. 1.0
-        linear.x  = maju (+)
-        linear.y  = geser kiri (+)
-        angular.z = putar kiri (+)
-
-Kirim ke ESP32 lewat USB serial, 20x per detik (juga berfungsi sebagai heartbeat):
-  V <vx> <vy> <w> <s>\\n
-        vx, vy, w = input inverse kinematics firmware (linear_x, linear_y, angular_z)
-                    firmware: linear_y = MAJU, linear_x = geser, angular_z = putar kiri (+)
-        s         = skala kecepatan 0.0 .. 1.0
-
-Keselamatan: kalau /cmd_vel berhenti datang lebih dari cmd_timeout_s,
-bridge mengirim perintah NOL. Firmware juga punya watchdog sendiri.
-"""
-
 import time
 
 import rclpy
