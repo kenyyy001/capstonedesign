@@ -10,7 +10,6 @@ class FollowControllerNode(Node):
     def __init__(self):
         super().__init__('follow_controller_node')
 
-        # ---------------- YAW (orientasi badan) ----------------
         self.declare_parameter('kp_yaw', 1.0)
         self.declare_parameter('offset_enter', 0.18)
         self.declare_parameter('offset_exit', 0.08)
@@ -18,32 +17,26 @@ class FollowControllerNode(Node):
         self.declare_parameter('max_yaw', 0.6)
         self.declare_parameter('min_yaw_command', 0.22)
 
-        # ---------------- STRAFE (gerak menyilang, HOLONOMIC) ----------------
         self.declare_parameter('kp_strafe', 1.0)
         self.declare_parameter('strafe_deadband', 0.05)   # mati dekat tengah
-        self.declare_parameter('max_strafe', 0.30)
-        self.declare_parameter('min_strafe_command', 0.10)
+        self.declare_parameter('max_strafe', 0.8)
+        self.declare_parameter('min_strafe_command', 0.5)
 
-        # ---------------- JARAK (3 zona) ----------------
         self.declare_parameter('far_threshold_m', 0.3)
         self.declare_parameter('near_threshold_m', 0.2)
         self.declare_parameter('forward_speed', 0.35)
         self.declare_parameter('backward_speed', 0.30)
         self.declare_parameter('max_valid_distance_m', 5.0)
-
         self.declare_parameter('lost_timeout_s', 0.5)
 
-        # declare (bersama declare lainnya)
         self.declare_parameter('lost_hold_s', 2.0)     # lama meneruskan perintah terakhir
         self.declare_parameter('lost_taper_s', 1.0)    # bagian akhir hold yang diturunkan linear ke 0
         self.declare_parameter('enable_yaw', False)    # False = hanya strafe, tanpa rotasi
 
-        # get (bersama get lainnya)
         self.lost_hold = self.get_parameter('lost_hold_s').value
         self.lost_taper = self.get_parameter('lost_taper_s').value
         self.enable_yaw = self.get_parameter('enable_yaw').value
 
-        # state (bersama state lainnya)
         self.last_cmd = (0.0, 0.0, 0.0)
         self.last_seen = None
         self.filter_ready = False
@@ -162,7 +155,6 @@ class FollowControllerNode(Node):
             offset_raw = self.position.x
             distance = self.position.y
 
-            # inisialisasi filter dengan sampel pertama, supaya tidak "loncat dari 0"
             if not self.filter_ready:
                 self.filtered_offset = offset_raw
                 self.filter_ready = True
@@ -177,7 +169,7 @@ class FollowControllerNode(Node):
                                 if self.enable_yaw else 0.0)
 
                 self.last_cmd = (cmd.linear.x, cmd.linear.y, cmd.angular.z)
-                self.last_seen = now   # <- setiap deteksi valid membatalkan masa hold
+                self.last_seen = now
                 state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
                         f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
 
@@ -192,7 +184,7 @@ class FollowControllerNode(Node):
                 cmd.angular.z = self.last_cmd[2] * f
                 state = 'HOLD (marker hilang sesaat)'
             else:
-                self.reset_tracking()   # masa hold habis -> berhenti & reset total
+                self.reset_tracking()
         else:
             self.reset_tracking()
 
