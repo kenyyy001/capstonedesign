@@ -19,10 +19,10 @@ class FollowControllerNode(Node):
         self.declare_parameter('offset_bias', 0.0)
         self.declare_parameter('yaw_deadband', 0.10)
 
-        self.declare_parameter('kp_strafe', 1.0)
-        self.declare_parameter('strafe_deadband', 0.05)   # mati dekat tengah
-        self.declare_parameter('max_strafe', 0.8)
-        self.declare_parameter('min_strafe_command', 0.5)
+        self.declare_parameter('kp_strafe', 0.5)
+        self.declare_parameter('strafe_deadband', 0.08)   # mati dekat tengah
+        self.declare_parameter('max_strafe', 0.20)
+        self.declare_parameter('min_strafe_command', 0.0)
 
         self.declare_parameter('far_threshold_m', 0.3)
         self.declare_parameter('near_threshold_m', 0.2)
@@ -49,6 +49,8 @@ class FollowControllerNode(Node):
         self.smoothing_alpha = self.get_parameter('offset_smoothing_alpha').value
         self.max_yaw = self.get_parameter('max_yaw').value
         self.min_yaw_command = self.get_parameter('min_yaw_command').value
+        self.offset_bias = self.get_parameter('offset_bias').value
+        self.yaw_deadband = self.get_parameter('yaw_deadband').value
 
         self.kp_strafe = 0.5
         self.strafe_deadband = 0.08
