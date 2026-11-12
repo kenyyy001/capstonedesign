@@ -270,7 +270,7 @@ class ArucoLockNode(Node):
                 cv2.putText(frame, f'Jarak: {distance_m:.2f}m', (int(center_x) - 60, int(center_y) + 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-                direction = "KIRI" if offset_x < -0.15 else "KANAN" if offset_x > 0.15 else "LURUS"
+                direction = "KIRI" if offset_x < -0.5 else "KANAN" if offset_x > 0.5 else "LURUS"
                 cv2.putText(frame, f'Arah: {direction} (offset:{offset_x:.2f})', (10, 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
 
