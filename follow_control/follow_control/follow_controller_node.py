@@ -32,7 +32,7 @@ class FollowControllerNode(Node):
         self.declare_parameter('lost_timeout_s', 0.5)
 
         self.declare_parameter('lost_hold_s', 1.0)     # lama meneruskan perintah terakhir
-        self.declare_parameter('lost_taper_s', 1.0)    # bagian akhir hold yang diturunkan linear ke 0
+        self.declare_parameter('lost_taper_s', 0.0)    # bagian akhir hold yang diturunkan linear ke 0
         self.declare_parameter('enable_yaw', False)    # False = hanya strafe, tanpa rotasi
 
         self.lost_hold = self.get_parameter('lost_hold_s').value
