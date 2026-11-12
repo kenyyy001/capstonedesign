@@ -87,7 +87,7 @@ class SerialBridgeNode(Node):
         vy = lx * self.linear_scale                          # maju -> linear_y firmware
         vx = self.lateral_sign * ly * self.linear_scale      # geser -> linear_x firmware
         w = self.yaw_sign * az * self.angular_scale          # putar -> angular_z firmware
-        s = min(1.0, max(abs(lx), abs(ly), abs(az)))         # skala kecepatan
+        s = min(1.0, max(0.5, abs(lx), abs(ly), abs(az)))         # skala kecepatan
 
         line = f'V {vx:.4f} {vy:.4f} {w:.4f} {s:.3f}\n'
         try:

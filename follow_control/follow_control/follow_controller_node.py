@@ -16,6 +16,8 @@ class FollowControllerNode(Node):
         self.declare_parameter('offset_smoothing_alpha', 0.3)
         self.declare_parameter('max_yaw', 0.6)
         self.declare_parameter('min_yaw_command', 0.22)
+        self.declare_parameter('offset_bias', 0.0)
+        self.declare_parameter('yaw_deadband', 0.10)
 
         self.declare_parameter('kp_strafe', 1.0)
         self.declare_parameter('strafe_deadband', 0.05)   # mati dekat tengah
@@ -48,10 +50,10 @@ class FollowControllerNode(Node):
         self.max_yaw = self.get_parameter('max_yaw').value
         self.min_yaw_command = self.get_parameter('min_yaw_command').value
 
-        self.kp_strafe = self.get_parameter('kp_strafe').value
-        self.strafe_deadband = self.get_parameter('strafe_deadband').value
-        self.max_strafe = self.get_parameter('max_strafe').value
-        self.min_strafe_command = self.get_parameter('min_strafe_command').value
+        self.kp_strafe = 0.5
+        self.strafe_deadband = 0.08
+        self.max_strafe = 0.20
+        self.min_strafe_command = 0.0
 
         self.far_threshold = self.get_parameter('far_threshold_m').value
         self.near_threshold = self.get_parameter('near_threshold_m').value
@@ -93,35 +95,21 @@ class FollowControllerNode(Node):
         age = (self.get_clock().now() - self.last_position_time).nanoseconds * 1e-9
         return age < self.lost_timeout
 
-    def compute_yaw(self, filtered_offset):
-        """Putar badan supaya lurus. Berjalan BERSAMAAN dengan strafe (lihat control_loop),
-        bukan menunggu strafe selesai -- itu prinsip holonomic yang Anda minta."""
-        magnitude = abs(filtered_offset)
-
-        if self.is_turning:
-            if magnitude < self.offset_exit:
-                self.is_turning = False
-        else:
-            if magnitude > self.offset_enter:
-                self.is_turning = True
-
-        if not self.is_turning:
+    @staticmethod
+    def soft_deadband(e, db):
+        if abs(e) <= db:
             return 0.0
+        return e - math.copysign(db, e)
 
-        value = -self.kp_yaw * filtered_offset
-        value = max(-self.max_yaw, min(self.max_yaw, value))
-        return value
+    def compute_yaw(self, e):
+        u = self.soft_deadband(e, self.yaw_deadband)
+        v = -self.kp_yaw * u
+        return max(-self.max_yaw, min(self.max_yaw, v))
 
-    def compute_strafe(self, filtered_offset):
-        if abs(filtered_offset) <= self.strafe_deadband:
-            return 0.0
-
-        e = filtered_offset - math.copysign(self.strafe_deadband, filtered_offset)
-        value = self.kp_strafe * e
-        value = max(-self.max_strafe, min(self.max_strafe, value))
-        if abs(value) < self.min_strafe_command:
-            value = math.copysign(self.min_strafe_command, value)
-        return value
+    def compute_strafe(self, e):
+        u = self.soft_deadband(e, self.strafe_deadband)
+        v = -self.kp_strafe * u
+        return max(-self.max_strafe, min(self.max_strafe, v))
 
     def compute_forward(self, distance):
         if distance > self.far_threshold:
@@ -152,7 +140,7 @@ class FollowControllerNode(Node):
         now = self.get_clock().now()
 
         if self.target_locked and self.position is not None and self.position_is_fresh():
-            offset_raw = self.position.x
+            offset_raw = self.position.x - self.offset_bias
             distance = self.position.y
 
             if not self.filter_ready:
@@ -180,7 +168,7 @@ class FollowControllerNode(Node):
                 full_until = self.lost_hold - taper
                 f = 1.0 if age <= full_until else (self.lost_hold - age) / taper
                 cmd.linear.x = self.last_cmd[0] * f
-                cmd.linear.y = self.last_cmd[1] * f
+                cmd.linear.y = 0.0
                 cmd.angular.z = self.last_cmd[2] * f
                 state = 'HOLD (marker hilang sesaat)'
             else:
