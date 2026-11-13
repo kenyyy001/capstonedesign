@@ -114,13 +114,12 @@ class FollowControllerNode(Node):
         return max(-self.max_strafe, min(self.max_strafe, v))
 
     def compute_forward(self, distance):
-        if distance > self.far_threshold:
-            self.distance_state = 'FORWARD'
-        elif distance < self.near_threshold:
+        if distance < self.near_threshold:
             self.distance_state = 'BACKWARD'
+        elif distance > self.far_threshold:
+            self.distance_state = 'FORWARD'
         else:
-            if self.distance_state != 'BACKWARD':
-                self.distance_state = 'STOP'
+            self.distance_state = 'STOP'
 
         if self.distance_state == 'FORWARD':
             return self.forward_speed
@@ -144,6 +143,15 @@ class FollowControllerNode(Node):
         if self.target_locked and self.position is not None and self.position_is_fresh():
             offset_raw = self.position.x - self.offset_bias
             distance = self.position.y
+
+            detecting = (self.target_locked and self.position is not None and self.position_is_fresh())
+
+            if not detecting:
+                self.filter_ready = False
+
+            if detecting:
+                offset_raw = self.position.x - self.offset_bias
+                distance = self.position.y 
 
             if not self.filter_ready:
                 self.filtered_offset = offset_raw
