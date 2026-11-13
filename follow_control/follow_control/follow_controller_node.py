@@ -29,16 +29,12 @@ class FollowControllerNode(Node):
         self.declare_parameter('forward_speed', 0.35)
         self.declare_parameter('backward_speed', 0.30)
         self.declare_parameter('max_valid_distance_m', 5.0)
-
         self.declare_parameter('lost_timeout_s', 0.5)
-        self.declare_parameter('lost_hold_s', 2.0)     
-        self.declare_parameter('lost_taper_s', 1.0)    
-        self.declare_parameter('enable_yaw', False)
 
-        self.declare_parameter('search_start_s', 3.0)      # mulai mencari setelah hilang selama ini
-        self.declare_parameter('search_yaw_speed', 0.1)   # kecepatan putar saat mencari
-        self.declare_parameter('search_max_s', 8.0)        # lama putar maksimum, lalu berhenti
-        self.declare_parameter('side_min_offset', 0.15)    # offset minimum agar sisi dianggap valid
+        self.declare_parameter('lost_hold_s', 2.0)     # lama meneruskan perintah terakhir
+        self.declare_parameter('lost_taper_s', 1.0)    # bagian akhir hold yang diturunkan linear ke 0
+        self.declare_parameter('enable_yaw', False)    # False = hanya strafe, tanpa rotasi
+
 
         self.lost_hold = self.get_parameter('lost_hold_s').value
         self.lost_taper = self.get_parameter('lost_taper_s').value
@@ -46,14 +42,6 @@ class FollowControllerNode(Node):
 
         self.last_cmd = (0.0, 0.0, 0.0)
         self.last_seen = None
-        self.search_start = self.get_parameter('search_start_s').value
-        self.search_yaw_speed = self.get_parameter('search_yaw_speed').value
-        self.search_max = self.get_parameter('search_max_s').value
-        self.side_min_offset = self.get_parameter('side_min_offset').value
-
-        self.last_detect_time = None   # TIDAK di-reset oleh reset_tracking()
-        self.last_side = 0.0           # +1 = terakhir di kanan, -1 = kiri
-        self.search_done = False
         self.filter_ready = False
 
         self.kp_yaw = self.get_parameter('kp_yaw').value
@@ -127,29 +115,19 @@ class FollowControllerNode(Node):
         return max(-self.max_strafe, min(self.max_strafe, v))
 
     def compute_forward(self, distance):
-        if distance < self.near_threshold:
-            self.distance_state = 'BACKWARD'
-        elif distance > self.far_threshold:
+        if distance > self.far_threshold:
             self.distance_state = 'FORWARD'
+        elif distance < self.near_threshold:
+            self.distance_state = 'BACKWARD'
         else:
-            self.distance_state = 'STOP'
+            if self.distance_state != 'BACKWARD':
+                self.distance_state = 'STOP'
 
         if self.distance_state == 'FORWARD':
             return self.forward_speed
         elif self.distance_state == 'BACKWARD':
             return -self.backward_speed
         return 0.0
-
-    def search_command(self, now):
-        if self.last_detect_time is None or self.last_side == 0.0 or self.search_done:
-            return None
-        lost_for = (now - self.last_detect_time).nanoseconds * 1e-9
-        if lost_for < self.search_start:
-            return None
-        if lost_for > self.search_start + self.search_max:
-            self.search_done = True
-            return None
-        return -self.last_side * self.search_yaw_speed
 
     def reset_tracking(self):
         self.distance_state = 'STOP'
@@ -164,12 +142,7 @@ class FollowControllerNode(Node):
         state = 'HILANG'
         now = self.get_clock().now()
 
-        detecting = (self.target_locked and self.position is not None and self.position_is_fresh())
-
-        if not detecting:
-            self.filter_ready = False
-
-        if detecting:
+        if self.target_locked and self.position is not None and self.position_is_fresh():
             offset_raw = self.position.x - self.offset_bias
             distance = self.position.y
 
@@ -188,10 +161,6 @@ class FollowControllerNode(Node):
 
                 self.last_cmd = (cmd.linear.x, cmd.linear.y, cmd.angular.z)
                 self.last_seen = now
-                self.last_detect_time = now
-                self.search_done = False
-                if abs(self.filtered_offset) >= self.side_min_offset:
-                    self.last_side = math.copysign(1.0, self.filtered_offset)
                 state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
                         f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
 
@@ -207,22 +176,14 @@ class FollowControllerNode(Node):
                 state = 'HOLD (marker hilang sesaat)'
             else:
                 self.reset_tracking()
-                search_z = self.search_command(now)
-                if search_z is not None:
-                    cmd.angular.z = search_z
-                    state = f'MENCARI (putar {"kanan" if search_z < 0 else "kiri"})'
         else:
-            search_z = self.search_command(now)
-            if search_z is not None:
-                cmd.angular.z = search_z
-                state = f'MENCARI (putar {"kanan" if search_z < 0 else "kiri"})'
+            self.reset_tracking()
 
         self.cmd_pub.publish(cmd)
 
         if state != self.last_state:
             self.get_logger().info(f'Status: {state}')
             self.last_state = state
-
 def main(args=None):
     rclpy.init(args=args)
     node = FollowControllerNode()
@@ -236,4 +197,3 @@ def main(args=None):
             rclpy.shutdown()
 
     if __name__ == '__main__':
-        main()
