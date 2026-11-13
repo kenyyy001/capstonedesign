@@ -31,7 +31,7 @@ class FollowControllerNode(Node):
         self.declare_parameter('max_valid_distance_m', 5.0)
 
         self.declare_parameter('lost_timeout_s', 0.5)
-        self.declare_parameter('lost_hold_s', 0.8)     
+        self.declare_parameter('lost_hold_s', 1.0)     
         self.declare_parameter('lost_taper_s', 1.0)    
         self.declare_parameter('enable_yaw', False)    
 
@@ -140,18 +140,14 @@ class FollowControllerNode(Node):
         state = 'HILANG'
         now = self.get_clock().now()
 
-        if self.target_locked and self.position is not None and self.position_is_fresh():
+        detecting = (self.target_locked and self.position is not None and self.position_is_fresh())
+
+        if not detecting:
+            self.filter_ready = False
+
+        if detecting:
             offset_raw = self.position.x - self.offset_bias
             distance = self.position.y
-
-            detecting = (self.target_locked and self.position is not None and self.position_is_fresh())
-
-            if not detecting:
-                self.filter_ready = False
-
-            if detecting:
-                offset_raw = self.position.x - self.offset_bias
-                distance = self.position.y 
 
             if not self.filter_ready:
                 self.filtered_offset = offset_raw
@@ -191,6 +187,7 @@ class FollowControllerNode(Node):
         if state != self.last_state:
             self.get_logger().info(f'Status: {state}')
             self.last_state = state
+
 def main(args=None):
     rclpy.init(args=args)
     node = FollowControllerNode()
