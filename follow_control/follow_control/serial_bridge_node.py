@@ -16,8 +16,8 @@ class SerialBridgeNode(Node):
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('linear_scale', 0.5)    # satuan firmware untuk translasi penuh (sama dengan tombol W = 0.5)
         self.declare_parameter('angular_scale', 1.0)   # satuan firmware untuk putar penuh (perlu tuning)
-        self.declare_parameter('lateral_sign', 1.0)   # ROS y = kiri, firmware x = kanan (BELUM diverifikasi fisik)
-        self.declare_parameter('yaw_sign', 1.0)        # ubah ke -1.0 kalau arah putar terbalik
+        self.declare_parameter('lateral_sign', 1.0)   # ROS y = kiri
+        self.declare_parameter('yaw_sign', 1.0)       # Angular 
         self.declare_parameter('cmd_timeout_s', 0.5)
         self.declare_parameter('send_rate_hz', 20.0)
 
@@ -44,7 +44,6 @@ class SerialBridgeNode(Node):
 
         self.get_logger().info(f'Serial bridge siap. Port: {self.port} @ {self.baud}')
 
-    # ------------------------------------------------------------------
     def cmd_callback(self, msg):
         self.last_lx = msg.linear.x
         self.last_ly = msg.linear.y
@@ -73,7 +72,6 @@ class SerialBridgeNode(Node):
         self.ser = None
         self.next_retry = time.time() + 2.0
 
-    # ------------------------------------------------------------------
     def send_loop(self):
         self.ensure_serial()
         if self.ser is None or time.time() < self.ready_at:
@@ -87,7 +85,7 @@ class SerialBridgeNode(Node):
         vy = lx * self.linear_scale                          # maju -> linear_y firmware
         vx = self.lateral_sign * ly * self.linear_scale      # geser -> linear_x firmware
         w = self.yaw_sign * az * self.angular_scale          # putar -> angular_z firmware
-        s = min(1.0, max(0.5, abs(lx), abs(ly), abs(az)))         # skala kecepatan
+        s = min(1.0, max(0.5, abs(lx), abs(ly), abs(az)))    # skala kecepatan
 
         line = f'V {vx:.4f} {vy:.4f} {w:.4f} {s:.3f}\n'
         try:
@@ -97,7 +95,6 @@ class SerialBridgeNode(Node):
             self.get_logger().error(f'Gagal menulis ke serial: {exc}')
             self.close_serial()
 
-    # ------------------------------------------------------------------
     def destroy_node(self):
         if self.ser is not None:
             try:
