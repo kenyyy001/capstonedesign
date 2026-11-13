@@ -188,7 +188,6 @@ class FollowControllerNode(Node):
 
                 self.last_cmd = (cmd.linear.x, cmd.linear.y, cmd.angular.z)
                 self.last_seen = now
-                self.last_seen = now
                 self.last_detect_time = now
                 self.search_done = False
                 if abs(self.filtered_offset) >= self.side_min_offset:
@@ -208,19 +207,21 @@ class FollowControllerNode(Node):
                 state = 'HOLD (marker hilang sesaat)'
             else:
                 self.reset_tracking()
+                search_z = self.search_command(now)
+                if search_z is not None:
+                    cmd.angular.z = search_z
+                    state = f'MENCARI (putar {"kanan" if search_z < 0 else "kiri"})'
         else:
-            self.reset_tracking()
+            search_z = self.search_command(now)
+            if search_z is not None:
+                cmd.angular.z = search_z
+                state = f'MENCARI (putar {"kanan" if search_z < 0 else "kiri"})'
+
         self.cmd_pub.publish(cmd)
 
         if state != self.last_state:
             self.get_logger().info(f'Status: {state}')
             self.last_state = state
-        else:
-            self.reset_tracking()
-            search_z = self.search_command(now)
-            if search_z is not None:
-                cmd.angular.z = search_z
-                state = f'MENCARI (putar {"kanan" if search_z < 0 else "kiri"})'
 
 def main(args=None):
     rclpy.init(args=args)
