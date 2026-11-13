@@ -37,7 +37,7 @@ class FollowControllerNode(Node):
 
         self.declare_parameter('search_start_s', 3.0)      # mulai mencari setelah hilang selama ini
         self.declare_parameter('search_yaw_speed', 0.05)   # kecepatan putar saat mencari
-        self.declare_parameter('search_max_s', 10.0)        # lama putar maksimum, lalu berhenti
+        self.declare_parameter('search_max_s', 9.0)        # lama putar maksimum, lalu berhenti
         self.declare_parameter('side_min_offset', 0.15)    # offset minimum agar sisi dianggap valid
 
         self.lost_hold = self.get_parameter('lost_hold_s').value
