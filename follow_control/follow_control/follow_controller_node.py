@@ -2,6 +2,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
+from std_msgs.msg import Bool
 from geometry_msgs.msg import Point, Twist
 
 
@@ -9,71 +10,87 @@ class FollowControllerNode(Node):
     def __init__(self):
         super().__init__('follow_controller_node')
 
-        defaults = {
-            'kp_yaw': 1.0, 'max_yaw': 0.6, 'yaw_deadband': 0.10,
-            'enable_yaw': False,
-            'kp_strafe': 0.5, 'strafe_deadband': 0.08, 'max_strafe': 0.20,
-            'offset_smoothing_alpha': 0.3, 'offset_bias': 0.0,
-            'desired_distance_m': 1.0, 'distance_band_m': 0.15,
-            'forward_speed': 0.35, 'backward_speed': 0.30,
-            'max_valid_distance_m': 5.0,
-            'lost_timeout_s': 0.2,
-            'coast_s': 0.4, 'settle_s': 0.4,
-            'search_enable': True, 'search_yaw': 0.25,
-            'search_pulse_s': 0.3, 'search_pause_s': 0.6,
-            'search_max_s': 5.0,
-        }
-        for k, v in defaults.items():
-            self.declare_parameter(k, v)
-        gp = lambda k: self.get_parameter(k).value
+        self.declare_parameter('kp_yaw', 1.0)
+        self.declare_parameter('offset_enter', 0.18)
+        self.declare_parameter('offset_exit', 0.08)
+        self.declare_parameter('offset_smoothing_alpha', 0.3)
+        self.declare_parameter('max_yaw', 0.6)
+        self.declare_parameter('min_yaw_command', 0.22)
+        self.declare_parameter('offset_bias', 0.0)
+        self.declare_parameter('yaw_deadband', 0.10)
 
-        self.kp_yaw = gp('kp_yaw')
-        self.max_yaw = gp('max_yaw')
-        self.yaw_deadband = gp('yaw_deadband')
-        self.enable_yaw = gp('enable_yaw')
-        self.kp_strafe = gp('kp_strafe')
-        self.strafe_deadband = gp('strafe_deadband')
-        self.max_strafe = gp('max_strafe')
-        self.smoothing_alpha = gp('offset_smoothing_alpha')
-        self.offset_bias = gp('offset_bias')
-        self.desired = gp('desired_distance_m')
-        self.band = gp('distance_band_m')
-        self.forward_speed = gp('forward_speed')
-        self.backward_speed = gp('backward_speed')
-        self.max_valid_distance = gp('max_valid_distance_m')
-        self.lost_timeout = gp('lost_timeout_s')
-        self.coast_s = gp('coast_s')
-        self.settle_s = gp('settle_s')
-        self.search_enable = gp('search_enable')
-        self.search_yaw = gp('search_yaw')
-        self.search_pulse = gp('search_pulse_s')
-        self.search_pause = gp('search_pause_s')
-        self.search_max = gp('search_max_s')
+        self.declare_parameter('kp_strafe', 0.5)
+        self.declare_parameter('strafe_deadband', 0.08)   # mati dekat tengah
+        self.declare_parameter('max_strafe', 0.20)
+        self.declare_parameter('min_strafe_command', 0.0)
 
-        self.position = None
-        self.last_position_time = None
-        self.new_sample = False
-        self.last_state = None
+        self.declare_parameter('far_threshold_m', 0.3)
+        self.declare_parameter('near_threshold_m', 0.2)
+        self.declare_parameter('forward_speed', 0.35)
+        self.declare_parameter('backward_speed', 0.30)
+        self.declare_parameter('max_valid_distance_m', 5.0)
+        self.declare_parameter('lost_timeout_s', 0.5)
+
+        self.declare_parameter('lost_hold_s', 2.0)     # lama meneruskan perintah terakhir
+        self.declare_parameter('lost_taper_s', 1.0)    # bagian akhir hold yang diturunkan linear ke 0
+        self.declare_parameter('enable_yaw', False)    # False = hanya strafe, tanpa rotasi
+
+
+        self.lost_hold = self.get_parameter('lost_hold_s').value
+        self.lost_taper = self.get_parameter('lost_taper_s').value
+        self.enable_yaw = self.get_parameter('enable_yaw').value
+
         self.last_cmd = (0.0, 0.0, 0.0)
         self.last_seen = None
-        self.last_side = 1.0          # sisi terakhir marker terlihat (+ = kanan)
-        self.filtered_offset = 0.0
         self.filter_ready = False
+
+        self.kp_yaw = self.get_parameter('kp_yaw').value
+        self.offset_enter = self.get_parameter('offset_enter').value
+        self.offset_exit = self.get_parameter('offset_exit').value
+        self.smoothing_alpha = self.get_parameter('offset_smoothing_alpha').value
+        self.max_yaw = self.get_parameter('max_yaw').value
+        self.min_yaw_command = self.get_parameter('min_yaw_command').value
+        self.offset_bias = self.get_parameter('offset_bias').value
+        self.yaw_deadband = self.get_parameter('yaw_deadband').value
+
+        self.kp_strafe = 0.5
+        self.strafe_deadband = 0.08
+        self.max_strafe = 0.20
+        self.min_strafe_command = 0.0
+
+        self.far_threshold = self.get_parameter('far_threshold_m').value
+        self.near_threshold = self.get_parameter('near_threshold_m').value
+        self.forward_speed = self.get_parameter('forward_speed').value
+        self.backward_speed = self.get_parameter('backward_speed').value
+        self.max_valid_distance = self.get_parameter('max_valid_distance_m').value
+
+        self.lost_timeout = self.get_parameter('lost_timeout_s').value
+
+        self.target_locked = False
+        self.position = None
+        self.last_position_time = None
+        self.last_state = None
+
+        self.filtered_offset = 0.0
+        self.is_turning = False
         self.distance_state = 'STOP'
 
-        self.create_subscription(Point, '/vision/target_position',
-                                 self.position_callback, 10)
+        self.create_subscription(Bool, '/vision/target_locked', self.locked_callback, 10)
+        self.create_subscription(Point, '/vision/target_position', self.position_callback, 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
         self.create_timer(1.0 / 20.0, self.control_loop)
 
         self.get_logger().info(
-            f'Follow controller siap. Jarak target {self.desired:.2f} m '
-            f'(maju>{self.desired + self.band:.2f}, mundur<{self.desired - self.band:.2f})')
+            f'Follow controller v3 (holonomic strafe) siap. Zona jarak: maju>{self.far_threshold}m, '
+            f'mundur<{self.near_threshold}m')
+
+    def locked_callback(self, msg):
+        self.target_locked = msg.data
 
     def position_callback(self, msg):
         self.position = msg
         self.last_position_time = self.get_clock().now()
-        self.new_sample = True
 
     def position_is_fresh(self):
         if self.last_position_time is None:
@@ -88,32 +105,33 @@ class FollowControllerNode(Node):
         return e - math.copysign(db, e)
 
     def compute_yaw(self, e):
-        v = -self.kp_yaw * self.soft_deadband(e, self.yaw_deadband)
+        u = self.soft_deadband(e, self.yaw_deadband)
+        v = -self.kp_yaw * u
         return max(-self.max_yaw, min(self.max_yaw, v))
 
     def compute_strafe(self, e):
-        v = -self.kp_strafe * self.soft_deadband(e, self.strafe_deadband)
+        u = self.soft_deadband(e, self.strafe_deadband)
+        v = -self.kp_strafe * u
         return max(-self.max_strafe, min(self.max_strafe, v))
 
-    def compute_forward(self, dist):
-        d, b, st = self.desired, self.band, self.distance_state
-        if dist > d + b:
-            st = 'FORWARD'
-        elif dist < d - b:
-            st = 'BACKWARD'
-        elif st == 'FORWARD' and dist <= d + 0.3 * b:
-            st = 'STOP'
-        elif st == 'BACKWARD' and dist >= d - 0.3 * b:
-            st = 'STOP'
-        self.distance_state = st
-        if st == 'FORWARD':
+    def compute_forward(self, distance):
+        if distance > self.far_threshold:
+            self.distance_state = 'FORWARD'
+        elif distance < self.near_threshold:
+            self.distance_state = 'BACKWARD'
+        else:
+            if self.distance_state != 'BACKWARD':
+                self.distance_state = 'STOP'
+
+        if self.distance_state == 'FORWARD':
             return self.forward_speed
-        if st == 'BACKWARD':
+        elif self.distance_state == 'BACKWARD':
             return -self.backward_speed
         return 0.0
 
     def reset_tracking(self):
         self.distance_state = 'STOP'
+        self.is_turning = False
         self.filtered_offset = 0.0
         self.filter_ready = False
         self.last_cmd = (0.0, 0.0, 0.0)
@@ -124,58 +142,38 @@ class FollowControllerNode(Node):
         state = 'HILANG'
         now = self.get_clock().now()
 
-        # Kesegaran posisi menggantikan target_locked (yang turun tiap 1 frame hilang)
-        seen = (self.position is not None and self.position_is_fresh()
-                and 0.0 < self.position.y <= self.max_valid_distance)
+        if self.target_locked and self.position is not None and self.position_is_fresh():
+            offset_raw = self.position.x - self.offset_bias
+            distance = self.position.y
 
-        if seen:
-            if self.new_sample:
-                self.new_sample = False
-                raw = self.position.x - self.offset_bias
-                if not self.filter_ready:
-                    self.filtered_offset = raw
-                    self.filter_ready = True
-                else:
-                    a = self.smoothing_alpha
-                    self.filtered_offset = a * raw + (1.0 - a) * self.filtered_offset
+            if not self.filter_ready:
+                self.filtered_offset = offset_raw
+                self.filter_ready = True
+            else:
+                a = self.smoothing_alpha
+                self.filtered_offset = a * offset_raw + (1.0 - a) * self.filtered_offset
 
-            if abs(self.filtered_offset) > 0.15:
-                self.last_side = math.copysign(1.0, self.filtered_offset)
+            if 0.0 < distance <= self.max_valid_distance:
+                cmd.linear.x = self.compute_forward(distance)
+                cmd.linear.y = self.compute_strafe(self.filtered_offset)
+                cmd.angular.z = (self.compute_yaw(self.filtered_offset)
+                                if self.enable_yaw else 0.0)
 
-            cmd.linear.x = self.compute_forward(self.position.y)
-            cmd.linear.y = self.compute_strafe(self.filtered_offset)
-            cmd.angular.z = (self.compute_yaw(self.filtered_offset)
-                             if self.enable_yaw else 0.0)
-
-            self.last_cmd = (cmd.linear.x, cmd.linear.y, cmd.angular.z)
-            self.last_seen = now
-            state = (f'MENGIKUTI (jarak={self.distance_state}, '
-                     f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
+                self.last_cmd = (cmd.linear.x, cmd.linear.y, cmd.angular.z)
+                self.last_seen = now
+                state = (f'MENGIKUTI (jarak_state={self.distance_state}, '
+                        f'strafe={cmd.linear.y:.2f}, yaw={cmd.angular.z:.2f})')
 
         elif self.last_seen is not None:
             age = (now - self.last_seen).nanoseconds * 1e-9
-            t_settle = self.coast_s + self.settle_s
-
-            if age < self.coast_s:
-                f = 1.0 - age / self.coast_s
-                reversing = self.last_cmd[0] < 0.0
-                # mundur = buta ke belakang -> berhenti langsung
-                cmd.linear.x = 0.0 if reversing else self.last_cmd[0] * f
-                cmd.linear.y = self.last_cmd[1] * f
+            if age < self.lost_hold:
+                taper = min(self.lost_taper, self.lost_hold)
+                full_until = self.lost_hold - taper
+                f = 1.0 if age <= full_until else (self.lost_hold - age) / taper
+                cmd.linear.x = self.last_cmd[0] * f
+                cmd.linear.y = 0.0
                 cmd.angular.z = self.last_cmd[2] * f
-                state = 'COAST (mundur: stop)' if reversing else 'COAST'
-            elif age < t_settle:
-                self.filter_ready = False
-                state = 'SETTLE (diam)'
-            elif self.search_enable and age < t_settle + self.search_max:
-                t = age - t_settle
-                phase = t % (self.search_pulse + self.search_pause)
-                if phase < self.search_pulse:
-                    # konvensi sama dgn compute_yaw: offset + (kanan) -> yaw negatif
-                    cmd.angular.z = -self.last_side * self.search_yaw
-                    state = 'SEARCH (putar)'
-                else:
-                    state = 'SEARCH (diam, deteksi)'
+                state = 'HOLD (marker hilang sesaat)'
             else:
                 self.reset_tracking()
         else:
@@ -186,8 +184,6 @@ class FollowControllerNode(Node):
         if state != self.last_state:
             self.get_logger().info(f'Status: {state}')
             self.last_state = state
-
-
 def main(args=None):
     rclpy.init(args=args)
     node = FollowControllerNode()
@@ -200,6 +196,5 @@ def main(args=None):
         if rclpy.ok():
             rclpy.shutdown()
 
-
-if __name__ == '__main__':
-    main()
+    if __name__ == '__main__':
+        main()
